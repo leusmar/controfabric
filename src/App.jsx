@@ -106,7 +106,7 @@ const normalizePurch = r => ({
   pay:r.payment_method, parcelas:r.installments, date:r.purchase_date, notes:r.notes
 });
 const normalizeProfile = r => ({
-  id:r.id, name:r.name, username:r.username, role:r.role, active:r.active
+  id:r.id, name:r.name, username:r.username, role:r.role, active:r.active, tenant_id:r.tenant_id
 });
 
 // ── DB helpers — all async ──
