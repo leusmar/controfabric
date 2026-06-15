@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
+import { createPortal } from "react-dom";
 import { createClient } from "@supabase/supabase-js";
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -567,14 +568,23 @@ function Sel({ label, value, onChange, options, req, style, disabled }) {
 
 // Modal
 function Modal({ open, onClose, title, children, width=560, noPad=false }) {
-  useEffect(function(){ document.body.style.overflow=open?"hidden":""; return()=>{document.body.style.overflow=""}; },[open]);
+  useEffect(function(){
+    if(open){
+      document.body.style.overflow="hidden";
+      document.documentElement.style.overflow="hidden";
+    }
+    return()=>{
+      document.body.style.overflow="";
+      document.documentElement.style.overflow="";
+    };
+  },[open]);
   if (!open) return null;
-  return (
+  return createPortal(
     <div
       onClick={onClose}
       style={{
-        position:"fixed", inset:0,
-        zIndex:1000, background:"rgba(12,12,11,.22)",
+        position:"fixed", top:0, left:0, right:0, bottom:0,
+        zIndex:99999, background:"rgba(12,12,11,.22)",
         backdropFilter:"blur(3px)", WebkitBackdropFilter:"blur(3px)",
         overflowY:"auto", overflowX:"hidden", WebkitOverflowScrolling:"touch",
         boxSizing:"border-box"
@@ -593,7 +603,8 @@ function Modal({ open, onClose, title, children, width=560, noPad=false }) {
         </div>
         <div style={{ padding:noPad?0:"20px" }}>{children}</div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 
@@ -3194,7 +3205,7 @@ export default function App() {
       )}
 
       <main style={{flex:1,overflow:"auto",padding:isSmall?"20px 16px 80px":"32px 40px",maxWidth:"100%"}}>
-        <div key={page} style={{animation:`cf-rise ${DS.slow} both`,maxWidth:1280,margin:"0 auto"}}>
+        <div key={page} style={{animation:`cf-fade ${DS.slow} both`,maxWidth:1280,margin:"0 auto"}}>
           {pages[page]||<div style={{color:DS.i3,textAlign:"center",padding:48}}>Módulo sem permissão de acesso.</div>}
         </div>
       </main>
