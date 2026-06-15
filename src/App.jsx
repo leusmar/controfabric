@@ -1370,7 +1370,7 @@ function PgProductions({ data, setData, reload, tenantId, fInit }) {
   const fc = p => forecast(p, data.outsourced);
   const sel = data.productions.find(p=>p.id===selId)||null;
 
-  const advance = prod => {
+  const advance = async prod => {
     const idx = STEPS.indexOf(prod.status);
     if (idx>=3) return;
     const next = STEPS[idx+1];
@@ -1381,22 +1381,22 @@ function PgProductions({ data, setData, reload, tenantId, fInit }) {
     const wF = next==="Costura"?"sewWs":next==="Acabamento"?"finWs":null;
     const sF = next==="Costura"?"sewStart":next==="Acabamento"?"finStart":null;
     const eF = idx===0?"cutEnd":idx===1?"sewEnd":"finEnd";
-    const nPay = next!=="Finalizado"?{desc:next+" — "+prod.no,cat:next,sup:ws?.name||next,phone:ws?.phone||"",amt:cost,due:addD(TODAY,30),paid:null,status:"Pendente",prodId:prod.id,notes:prod.total+"pç × "+R(price||0)}:null;
-    setData(d=>({
-      ...d,
-      productions:d.productions.map(p=>{
-        if(p.id!==prod.id) return p;
-        const u={...p,status:next,[eF]:TODAY,log:[...p.log,{date:TODAY,step:next,txt:"Avançado para "+next}]};
-        if(wF) u[wF]=ws?.name||"";
-        if(sF) u[sF]=TODAY;
-        if(next==="Costura") u.sewC=cost;
-        if(next==="Acabamento") u.finC=cost;
-        return u;
-      }),
-      payables:nPay?[...d.payables,nPay]:d.payables,
-    }));
-    const product = gP(prod.productId);
-    if(ws) doPrint({...prod,status:next},product,next,data.outsourced);
+    const updated = {...prod,status:next,[eF]:TODAY,log:[...(prod.log||[]),{date:TODAY,step:next,txt:"Avançado para "+next}]};
+    if(wF) updated[wF]=ws?.name||"";
+    if(sF) updated[sF]=TODAY;
+    if(next==="Costura") updated.sewC=cost;
+    if(next==="Acabamento") updated.finC=cost;
+    try {
+      const savedProd = await sb.saveProd(updated, tenantId);
+      setData(d=>({...d,productions:d.productions.map(p=>p.id===savedProd.id?savedProd:p)}));
+      if(next!=="Finalizado"){
+        const nPay={desc:next+" — "+prod.no,cat:next,sup:ws?.name||next,phone:ws?.phone||"",amt:cost,due:addD(TODAY,30),paid:null,status:"Pendente",prodId:prod.id,notes:prod.total+"pç × "+R(price||0)};
+        const savedPay = await sb.savePay(nPay, tenantId);
+        setData(d=>({...d,payables:[...d.payables,savedPay]}));
+        if(ws) doPrint(savedProd,pr,next,data.outsourced);
+      }
+      showToast("Produção avançada para "+next+".","ok");
+    } catch(e){ showToast("Erro ao avançar: "+e.message,"err"); }
     setSelId(null);
   };
 
@@ -1469,9 +1469,13 @@ function PgProductions({ data, setData, reload, tenantId, fInit }) {
                     </div>
                     <div style={{textAlign:"right",flexShrink:0}}>
                       <div style={{fontSize:12,color:DS.i3,marginBottom:2}}>Início: {FD(prod.start)}</div>
-                      <div style={{fontSize:12,color:prod.status!=="Finalizado"?(f2.late?DS.err:DS.i3):DS.ok}}>
+                      <div style={{fontSize:12,color:prod.status!=="Finalizado"?(f2.late?DS.err:DS.i3):DS.ok,marginBottom:6}}>
                         {prod.status!=="Finalizado"?(f2.late?Math.abs(f2.dLeft)+"d atrasado":"Prev. "+FD(f2.fE)):("✓ "+FD(prod.finEnd))}
                       </div>
+                      {totalC>0&&<div style={{display:"inline-block",background:DS.surEl,borderRadius:DS.r6,padding:"3px 8px"}}>
+                        <span style={{fontSize:10,color:DS.i3}}>Custo/pç </span>
+                        <strong style={{fontSize:12,color:DS.i1,fontVariantNumeric:"tabular-nums"}}>{R(totalC/prod.total)}</strong>
+                      </div>}
                     </div>
                   </div>
                 </div>
@@ -1664,8 +1668,8 @@ function PgCutOrder({ data, setData, reload, tenantId }) {
       for(const rmId of Object.keys(fabConsumed)){
         const m=rawMaterials.find(x=>x.id==rmId);
         if(m){
-          const newColors=(m.colors||[]).map(c=>{ const used=(fabByColor[rmId]||{})[c.name]||0; return used>0?{...c,stock:Math.max(0,(c.stock||0)-used)}:c; });
-          const updRM=await sb.saveRM({...m,stock:Math.max(0,m.stock-fabConsumed[rmId]),colors:newColors},tenantId);
+          const newColors=(m.colors||[]).map(c=>{ const used=(fabByColor[rmId]||{})[c.name]||0; return used>0?{...c,stock:(c.stock||0)-used}:c; });
+          const updRM=await sb.saveRM({...m,stock:m.stock-fabConsumed[rmId],colors:newColors},tenantId);
           setData(d=>({...d,rawMaterials:d.rawMaterials.map(x=>x.id==rmId?updRM:x)}));
         }
       }
@@ -1673,7 +1677,7 @@ function PgCutOrder({ data, setData, reload, tenantId }) {
       for(const [trimId,consumed] of Object.entries(trimConsumed)){
         const t=data.trims.find(x=>x.id==trimId);
         if(t){
-          const updTrim=await sb.saveTrim({...t,stock:Math.max(0,t.stock-consumed)},tenantId);
+          const updTrim=await sb.saveTrim({...t,stock:t.stock-consumed},tenantId);
           setData(d=>({...d,trims:d.trims.map(x=>x.id==trimId?updTrim:x)}));
         }
       }
@@ -1931,12 +1935,43 @@ function PgFinancial({ data, setData, reload, tenantId, fInit }) {
   const [fSt,setFS]  = useState("all");
   const [fPer,setFP] = useState(fInit||"all");
   const [sel,setSel] = useState(null);
+  const [showF,setShowF] = useState(false);
   useEffect(function(){if(fInit)setFP(fInit);},[fInit]);
+
+  const CATEGORIAS = ["Aluguel","Salários","Energia","Água","Internet/Telefone","Impostos","Matéria-prima","Manutenção","Marketing","Outros"];
+  const EF = {desc:"",cat:"Aluguel",sup:"",phone:"",amt:"",due:TODAY,tipo:"avulsa",parcelas:"2",recMeses:"6"};
+  const [form,setForm] = useState(EF);
+  const fld = k => v => setForm(p=>({...p,[k]:v}));
 
   const doMark = async id => { try{ const u=await sb.updatePayStatus(id,"Pago",TODAY); setData(d=>({...d,payables:d.payables.map(p=>p.id===id?u:p)})); showToast("Pagamento registrado.","ok"); }catch(e){showToast("Erro: "+e.message,"err");} };
   const doUnmark = async id => { try{ const u=await sb.updatePayStatus(id,"Pendente",null); setData(d=>({...d,payables:d.payables.map(p=>p.id===id?u:p)})); showToast("Pagamento revertido para pendente.","ok"); }catch(e){showToast("Erro: "+e.message,"err");} };
   const delPay = (id,e) => { if(e)e.stopPropagation(); confirmDelete(async()=>{try{await sb.deletePay(id);setData(d=>({...d,payables:d.payables.filter(p=>p.id!==id)}));}catch(er){showToast("Erro: "+er.message,"err");}},{title:"Excluir conta",message:"Esta conta a pagar será excluída. Esta ação não pode ser desfeita."}); };
   const wa = (phone,desc,amt) => { const m=encodeURIComponent("Olá! Pgto ref: *"+desc+"* — "+R(amt)); window.open("https://wa.me/55"+phone.replace(/\D/g,"")+"?text="+m,"_blank"); };
+
+  const doSaveExpense = async () => {
+    if(!form.desc||!form.amt){ showToast("Preencha descrição e valor.","err"); return; }
+    const amt=parseFloat(form.amt)||0;
+    try {
+      if(form.tipo==="avulsa"){
+        const saved=await sb.savePay({desc:form.desc,cat:form.cat,sup:form.sup,phone:form.phone,amt,due:form.due,paid:null,status:"Pendente",prodId:null,notes:"Despesa avulsa"},tenantId);
+        setData(d=>({...d,payables:[...d.payables,saved]}));
+      } else if(form.tipo==="parcelada"){
+        const n=parseInt(form.parcelas)||2;
+        const arr=[];
+        for(let i=0;i<n;i++){ arr.push({desc:form.desc+" — Parcela "+(i+1)+"/"+n,cat:form.cat,sup:form.sup,phone:form.phone,amt,due:addD(form.due,i*30),paid:null,status:"Pendente",prodId:null,notes:"Parcelamento"}); }
+        const saved=await sb.insertPayBatch(arr,tenantId);
+        setData(d=>({...d,payables:[...d.payables,...saved]}));
+      } else if(form.tipo==="recorrente"){
+        const n=parseInt(form.recMeses)||6;
+        const arr=[];
+        for(let i=0;i<n;i++){ arr.push({desc:form.desc+" — "+(i+1)+"º mês",cat:form.cat,sup:form.sup,phone:form.phone,amt,due:addD(form.due,i*30),paid:null,status:"Pendente",prodId:null,notes:"Conta recorrente mensal"}); }
+        const saved=await sb.insertPayBatch(arr,tenantId);
+        setData(d=>({...d,payables:[...d.payables,...saved]}));
+      }
+      setShowF(false); setForm(EF);
+      showToast("Despesa lançada com sucesso.","ok");
+    } catch(e){ showToast("Erro ao lançar: "+e.message,"err"); }
+  };
 
   const list = data.payables.filter(p=>{
     if(fCat!=="all"&&p.cat!==fCat) return false;
@@ -1953,7 +1988,7 @@ function PgFinancial({ data, setData, reload, tenantId, fInit }) {
 
   return (
     <div>
-      <SH title="Financeiro"/>
+      <SH title="Financeiro" action={<Btn onClick={()=>{setForm(EF);setShowF(true);}}>+ Nova despesa</Btn>}/>
       {/* Summary row */}
       <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10,marginBottom:24}}>
         {[
@@ -2023,6 +2058,50 @@ function PgFinancial({ data, setData, reload, tenantId, fInit }) {
             </div>
           );
         })()}
+      </Modal>
+
+      {/* Formulário de nova despesa */}
+      <Modal open={showF} onClose={()=>{setShowF(false);setForm(EF);}} title="Nova despesa" width={520}>
+        <div style={{display:"flex",flexDirection:"column",gap:14}}>
+          <Inp label="Descrição" req value={form.desc} onChange={fld("desc")} placeholder="Ex: Aluguel do galpão"/>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+            <Sel label="Categoria" value={form.cat} onChange={fld("cat")} options={CATEGORIAS.map(c=>({v:c,l:c}))}/>
+            <Inp label="Valor (R$)" req type="number" value={form.amt} onChange={fld("amt")} placeholder="0,00"/>
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+            <Inp label="Fornecedor / Para quem" value={form.sup} onChange={fld("sup")} placeholder="Opcional"/>
+            <Inp label="Telefone" value={form.phone} onChange={fld("phone")} placeholder="Opcional"/>
+          </div>
+          <div>
+            <Lbl ch="Tipo de lançamento" style={{marginBottom:8}}/>
+            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+              {[{v:"avulsa",l:"Conta única"},{v:"parcelada",l:"Parcelada"},{v:"recorrente",l:"Recorrente (mensal)"}].map(opt=>(
+                <button key={opt.v} onClick={()=>fld("tipo")(opt.v)} style={{flex:1,minWidth:130,padding:"10px 12px",borderRadius:DS.r8,border:`1px solid ${form.tipo===opt.v?DS.ink:DS.bd}`,background:form.tipo===opt.v?DS.ink:"transparent",color:form.tipo===opt.v?"#fff":DS.i2,cursor:"pointer",fontFamily:"inherit",fontSize:13,fontWeight:500}}>{opt.l}</button>
+              ))}
+            </div>
+          </div>
+          {form.tipo==="parcelada"&&(
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,background:DS.surEl,borderRadius:DS.r10,padding:14}}>
+              <Inp label="Nº de parcelas que faltam" type="number" value={form.parcelas} onChange={fld("parcelas")} placeholder="2"/>
+              <Inp label="1º vencimento" type="date" value={form.due} onChange={fld("due")}/>
+              <div style={{gridColumn:"span 2",fontSize:12,color:DS.i3}}>Serão criadas {form.parcelas||0} parcelas de {R(parseFloat(form.amt)||0)}, uma a cada 30 dias a partir do 1º vencimento.</div>
+            </div>
+          )}
+          {form.tipo==="recorrente"&&(
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,background:DS.surEl,borderRadius:DS.r10,padding:14}}>
+              <Inp label="Por quantos meses" type="number" value={form.recMeses} onChange={fld("recMeses")} placeholder="6"/>
+              <Inp label="1º vencimento" type="date" value={form.due} onChange={fld("due")}/>
+              <div style={{gridColumn:"span 2",fontSize:12,color:DS.i3}}>Conta de {R(parseFloat(form.amt)||0)} repetida por {form.recMeses||0} meses (ex: aluguel, salário fixo).</div>
+            </div>
+          )}
+          {form.tipo==="avulsa"&&(
+            <Inp label="Vencimento" type="date" value={form.due} onChange={fld("due")}/>
+          )}
+          <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
+            <Btn v="secondary" onClick={()=>{setShowF(false);setForm(EF);}}>Cancelar</Btn>
+            <Btn onClick={doSaveExpense}>Lançar despesa</Btn>
+          </div>
+        </div>
       </Modal>
     </div>
   );
@@ -2582,14 +2661,53 @@ function StockItemView({ item, onEdit }) {
   );
 }
 
+function calcProductCost(prod, data){
+  if(!prod) return {fabric:0,trim:0,cut:0,sew:0,fin:0,total:0};
+  // Tecido: média do consumo entre cores × custo médio do tecido
+  let fabric=0;
+  (prod.colorFabrics||[]).forEach(cf=>{
+    const rm=data.rawMaterials.find(r=>r.id===cf.rmId);
+    if(rm){
+      const sizes=prod.sizes||[];
+      const consVals=sizes.map(sz=>cf.cons?.[sz]||0).filter(v=>v>0);
+      const avgCons=consVals.length?consVals.reduce((a,b)=>a+b,0)/consVals.length:0;
+      fabric+=avgCons*(rm.avgCost||0);
+    }
+  });
+  // Média entre cores (cada peça usa uma cor)
+  const nColors=(prod.colorFabrics||[]).length||1;
+  fabric=fabric/nColors;
+  // Aviamentos
+  let trim=0;
+  (prod.trimUsage||[]).forEach(tu=>{
+    const t=data.trims.find(t=>t.id===tu.trimId);
+    if(t) trim+=(t.avgCost||0)*(tu.qty||0);
+  });
+  const cut=prod.cutPrice||0, sew=prod.sewPrice||0, fin=prod.finishPrice||0;
+  return {fabric,trim,cut,sew,fin,total:fabric+trim+cut+sew+fin};
+}
+
 function ProductView({ sel, data, onEdit }) {
   const prods = data.productions.filter(p=>p.productId===sel.id);
+  const cost = calcProductCost(sel, data);
   return (
     <div style={{display:"flex",flexDirection:"column",gap:16}}>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
         {[["SKU",sel.sku],["Categoria",sel.category],["Coleção",sel.collection],["Corte/pç",R(sel.cutPrice)],["Costura/pç",R(sel.sewPrice)],["Acab./pç",R(sel.finishPrice)]].map(([l,v])=>(
           <div key={l} style={{background:DS.surEl,borderRadius:DS.r8,padding:"10px 12px"}}><Lbl ch={l} style={{marginBottom:3}}/><div style={{fontSize:13,fontWeight:500}}>{v}</div></div>
         ))}
+      </div>
+      {/* Custo médio total do produto */}
+      <div style={{background:DS.ink,borderRadius:DS.r12,padding:"16px 18px",color:"#fff"}}>
+        <div style={{fontSize:11,color:"rgba(255,255,255,.6)",marginBottom:6,letterSpacing:".04em",textTransform:"uppercase"}}>Custo médio por peça</div>
+        <div style={{fontSize:26,fontWeight:780,letterSpacing:"-.6px",marginBottom:10}}>{R(cost.total)}</div>
+        <div style={{display:"flex",gap:14,flexWrap:"wrap",fontSize:11,color:"rgba(255,255,255,.7)"}}>
+          <span>Tecido {R(cost.fabric)}</span>
+          <span>Aviamentos {R(cost.trim)}</span>
+          <span>Corte {R(cost.cut)}</span>
+          <span>Costura {R(cost.sew)}</span>
+          <span>Acab. {R(cost.fin)}</span>
+        </div>
       </div>
       <div><Lbl ch="Cores e tecidos" style={{marginBottom:8}}/>
         {sel.colorFabrics?.map(cf=>{
@@ -2619,21 +2737,22 @@ function PgProducts({ data, setData, reload, tenantId }) {
   const [showF,setShowF] = useState(false);
   const [ed,setEd]       = useState(null);
   const [sel,setSel]     = useState(null);
-  const EF = {sku:"",name:"",category:"",collection:"",sizes:"",colorFabrics:[],trimUsage:[],cutPrice:"",sewPrice:"",finishPrice:""};
+  const EF = {sku:"",name:"",category:"",collection:"",sizes:"",colorFabrics:[],trimUsage:[],cutPrice:"",sewPrice:"",finishPrice:"",modelCons:{}};
   const [form,setForm]   = useState(EF);
   const fld = k => v => setForm(p=>({...p,[k]:v}));
-  const openEdit = p => {setSel(null);setEd(p);setForm({...p,sizes:p.sizes?.join(", ")||"",colorFabrics:p.colorFabrics.map(cf=>({...cf,cons:{...cf.cons}})),trimUsage:[...p.trimUsage]});setShowF(true);};
+  const openEdit = p => {setSel(null);setEd(p);setForm({...p,sizes:p.sizes?.join(", ")||"",colorFabrics:p.colorFabrics.map(cf=>({...cf,cons:{...cf.cons}})),trimUsage:[...p.trimUsage],modelCons:p.modelCons||p.colorFabrics?.[0]?.cons||{}});setShowF(true);};
   const addCF = () => setForm(p=>({...p,colorFabrics:[...p.colorFabrics,{color:"",rmId:"",cons:{}}]}));
   const remCF = i => setForm(p=>({...p,colorFabrics:p.colorFabrics.filter((_,j)=>j!==i)}));
   const setCFcol = (i,v)=>setForm(p=>({...p,colorFabrics:p.colorFabrics.map((cf,j)=>j===i?{...cf,color:v}:cf)}));
   const setCFrm  = (i,v)=>setForm(p=>({...p,colorFabrics:p.colorFabrics.map((cf,j)=>j===i?{...cf,rmId:v||""}:cf)}));
   const setCFcons= (i,sz,v)=>setForm(p=>({...p,colorFabrics:p.colorFabrics.map((cf,j)=>j===i?{...cf,cons:{...cf.cons,[sz]:parseFloat(v)||0}}:cf)}));
+  const setModelCons = (sz,v)=>setForm(p=>({...p,modelCons:{...p.modelCons,[sz]:parseFloat(v)||0}}));
   const setTrimQty = (trimId,qty) => setForm(p=>({...p,trimUsage:p.trimUsage.map(tu=>tu.trimId===trimId?{...tu,qty:qty}:tu)}));
   const togTrim = id => setForm(p=>{const has=p.trimUsage.find(tu=>tu.trimId===id);return{...p,trimUsage:has?p.trimUsage.filter(tu=>tu.trimId!==id):[...p.trimUsage,{trimId:id,qty:1}]};});
   const delProd = (id,e) => {e.stopPropagation();confirmDelete(async()=>{try{await sb.deleteProduct(id);setData(d=>({...d,products:d.products.filter(p=>p.id!==id)}));}catch(er){showToast("Erro: "+er.message,"err");}},{title:"Excluir produto"});};
   const doSave = async () => {
     const sizes=(form.sizes||"").split(",").map(s=>s.trim()).filter(Boolean);
-    const prod={...(ed?{id:ed.id}:{}),sku:form.sku,name:form.name,category:form.category,collection:form.collection,sizes,colorFabrics:form.colorFabrics,trimUsage:form.trimUsage.map(tu=>({...tu,qty:parseInt(tu.qty)||0})).filter(tu=>tu.qty>0),cutPrice:parseFloat(form.cutPrice)||0,sewPrice:parseFloat(form.sewPrice)||0,finishPrice:parseFloat(form.finishPrice)||0};
+    const prod={...(ed?{id:ed.id}:{}),sku:form.sku,name:form.name,category:form.category,collection:form.collection,sizes,colorFabrics:form.colorFabrics.map(cf=>({...cf,cons:{...form.modelCons}})),trimUsage:form.trimUsage.map(tu=>({...tu,qty:parseInt(tu.qty)||0})).filter(tu=>tu.qty>0),cutPrice:parseFloat(form.cutPrice)||0,sewPrice:parseFloat(form.sewPrice)||0,finishPrice:parseFloat(form.finishPrice)||0,modelCons:form.modelCons};
     try{
       const saved=await sb.saveProduct(prod,tenantId);
       setData(d=>({...d,products:ed?d.products.map(p=>p.id===saved.id?saved:p):[...d.products,saved]}));
@@ -2721,33 +2840,42 @@ function PgProducts({ data, setData, reload, tenantId }) {
               })}
             </div>
           </div>
+          {/* Consumo por modelo (compartilhado entre cores) */}
+          <div>
+            <Lbl ch="Consumo de tecido por tamanho (do modelo)" style={{marginBottom:8}}/>
+            {szList.length>0 ? (
+              <div style={{display:"flex",gap:8,flexWrap:"wrap",padding:"12px 14px",background:DS.surEl,borderRadius:DS.r10}}>
+                {szList.map(sz=>(
+                  <div key={sz} style={{display:"flex",flexDirection:"column",alignItems:"center",gap:4}}>
+                    <span style={{fontSize:10,color:DS.i3,fontWeight:600}}>{sz}</span>
+                    <input type="number" step="0.1" min="0" value={form.modelCons?.[sz]||""} onChange={e=>setModelCons(sz,e.target.value)} placeholder="0m" style={{width:56,height:32,padding:"0 4px",borderRadius:DS.r6,border:`1px solid ${DS.bd}`,textAlign:"center",fontSize:12,fontFamily:"inherit"}}/>
+                  </div>
+                ))}
+              </div>
+            ) : <Bnr type="info">Preencha os tamanhos acima para configurar o consumo.</Bnr>}
+          </div>
           {/* Cores e tecidos */}
           <div>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
               <Lbl ch="Cores e tecidos"/>
               <Btn sz="sm" v="secondary" onClick={addCF}>+ Cor</Btn>
             </div>
-            {form.colorFabrics?.map((cf,i)=>(
-              <div key={i} style={{border:`1px solid ${DS.bd}`,borderRadius:DS.r10,padding:"12px 14px",marginBottom:10}}>
-                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr auto",gap:10,marginBottom:10}}>
-                  <Inp label="Cor" value={cf.color} onChange={v=>setCFcol(i,v)} placeholder="Ex: Preto"/>
-                  <Sel label="Tecido" value={cf.rmId||""} onChange={v=>setCFrm(i,v)} options={[{v:"",l:"Selecione…"},...data.rawMaterials.map(rm=>({v:rm.id,l:rm.desc+" ("+rm.code+")"}))]}/>
-                  <div style={{display:"flex",alignItems:"flex-end"}}><IBt icon="✕" onClick={()=>remCF(i)} v="danger"/></div>
-                </div>
-                {szList.length>0&&<div>
-                  <Lbl ch="Consumo (m) por tamanho" style={{marginBottom:6}}/>
-                  <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-                    {szList.map(sz=>(
-                      <div key={sz} style={{display:"flex",flexDirection:"column",alignItems:"center",gap:4}}>
-                        <span style={{fontSize:10,color:DS.i3,fontWeight:600}}>{sz}</span>
-                        <input type="number" step="0.1" min="0" value={cf.cons?.[sz]||""} onChange={e=>setCFcons(i,sz,e.target.value)} style={{width:56,height:32,padding:"0 4px",borderRadius:DS.r6,border:`1px solid ${DS.bd}`,textAlign:"center",fontSize:12,fontFamily:"inherit"}}/>
-                      </div>
-                    ))}
+            {form.colorFabrics?.map((cf,i)=>{
+              const selRm=data.rawMaterials.find(r=>r.id===cf.rmId);
+              const rmColors=selRm?.colors||[];
+              return (
+                <div key={i} style={{border:`1px solid ${DS.bd}`,borderRadius:DS.r10,padding:"12px 14px",marginBottom:10}}>
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr auto",gap:10}}>
+                    <Sel label="Tecido" value={cf.rmId||""} onChange={v=>setCFrm(i,v)} options={[{v:"",l:"Selecione…"},...data.rawMaterials.map(rm=>({v:rm.id,l:rm.desc+" ("+rm.code+")"}))]}/>
+                    {rmColors.length>0
+                      ? <Sel label="Cor" value={cf.color||""} onChange={v=>setCFcol(i,v)} options={[{v:"",l:"Selecione…"},...rmColors.map(c=>({v:c.name,l:c.name}))]}/>
+                      : <Inp label="Cor" value={cf.color} onChange={v=>setCFcol(i,v)} placeholder={selRm?"Tecido sem cores":"Ex: Preto"}/>}
+                    <div style={{display:"flex",alignItems:"flex-end"}}><IBt icon="✕" onClick={()=>remCF(i)} v="danger"/></div>
                   </div>
-                </div>}
-                {szList.length===0&&<Bnr type="info">Preencha os tamanhos acima para configurar o consumo.</Bnr>}
-              </div>
-            ))}
+                  {selRm&&rmColors.length===0&&<div style={{fontSize:11,color:DS.i3,marginTop:6}}>Dica: cadastre cores neste tecido para escolher na lista.</div>}
+                </div>
+              );
+            })}
             {form.colorFabrics?.length===0&&<div style={{padding:14,background:DS.surEl,borderRadius:DS.r8,textAlign:"center",fontSize:12,color:DS.i3}}>Clique em "+ Cor" para adicionar</div>}
           </div>
           <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
