@@ -569,13 +569,15 @@ function Modal({ open, onClose, title, children, width=560, noPad=false }) {
   useEffect(function(){ document.body.style.overflow=open?"hidden":""; return()=>{document.body.style.overflow=""}; },[open]);
   if (!open) return null;
   return (
-    <div onClick={onClose} style={{ position:"fixed",inset:0,zIndex:1000,background:"rgba(12,12,11,.2)",backdropFilter:"blur(3px)",WebkitBackdropFilter:"blur(3px)",display:"flex",alignItems:"center",justifyContent:"center",padding:"16px",animation:`cf-fade ${DS.base} both` }}>
-      <div onClick={e=>e.stopPropagation()} style={{ background:DS.sur,borderRadius:DS.r20,width:"100%",maxWidth:width,maxHeight:"90vh",boxShadow:DS.e4,border:`1px solid ${DS.bd}`,display:"flex",flexDirection:"column",animation:`cf-scale ${DS.base} both` }}>
-        <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",padding:"18px 22px",borderBottom:`1px solid ${DS.bd}`,flexShrink:0 }}>
-          <span style={{ fontSize:17,fontWeight:700,color:DS.i1,letterSpacing:"-.3px" }}>{title}</span>
-          <IBt icon={<svg width="15" height="15" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="2"><path d="M1 1l12 12M13 1L1 13"/></svg>} onClick={onClose}/>
+    <div style={{ position:"fixed",top:0,left:0,right:0,bottom:0,zIndex:1000,background:"rgba(12,12,11,.22)",backdropFilter:"blur(3px)",WebkitBackdropFilter:"blur(3px)",overflowY:"auto",WebkitOverflowScrolling:"touch" }} onClick={onClose}>
+      <div style={{padding:"24px 16px 60px",display:"flex",justifyContent:"center"}}>
+        <div onClick={e=>e.stopPropagation()} style={{ background:DS.sur,borderRadius:DS.r20,width:"100%",maxWidth:width,boxShadow:DS.e4,border:`1px solid ${DS.bd}`,animation:`cf-scale ${DS.base} both` }}>
+          <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",padding:"16px 20px",borderBottom:`1px solid ${DS.bd}` }}>
+            <span style={{ fontSize:17,fontWeight:700,color:DS.i1,letterSpacing:"-.3px" }}>{title}</span>
+            <IBt icon={<svg width="15" height="15" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="2"><path d="M1 1l12 12M13 1L1 13"/></svg>} onClick={onClose}/>
+          </div>
+          <div style={{ padding:noPad?0:"20px" }}>{children}</div>
         </div>
-        <div style={{ padding:noPad?0:"22px",overflowY:"auto",WebkitOverflowScrolling:"touch",flexGrow:1 }}>{children}</div>
       </div>
     </div>
   );
@@ -1582,6 +1584,24 @@ function PgCutOrder({ data, setData, reload, tenantId }) {
   const cutEst=()=>(sp?.cutPrice||0)*totalPcs;
 
   const [showNew,setShowNew] = useState(false);
+  // Forro — tecido secundário opcional por cor
+  const [forroEnabled,setForroEnabled] = useState(false);
+  const [forroItems,setForroItems] = useState([]);
+  const setForroRm = (color,rmId) => setForroItems(prev=>{const next=prev.filter(f=>f.color!==color);if(rmId)next.push({color,rmId,cons:{}});return next;});
+  const setForroCons = (color,sz,val) => setForroItems(prev=>prev.map(f=>f.color===color?{...f,cons:{...f.cons,[sz]:parseFloat(val)||0}}:f));
+  const getForroItem = color => forroItems.find(f=>f.color===color);
+  const forroFabSum = () => {
+    const m={};
+    forroItems.forEach(f=>{
+      const totalForColor = qtys.filter(q=>q.color===f.color).reduce((s,q)=>s+(f.cons?.[q.size]||0)*q.qty,0);
+      if(totalForColor>0&&f.rmId){
+        const rm=rawMaterials.find(r=>r.id==f.rmId);
+        if(!m[f.rmId])m[f.rmId]={rm,total:0};
+        m[f.rmId].total+=totalForColor;
+      }
+    });
+    return Object.values(m);
+  };
 
   const create = async () => {
     if(!pid||!cw||totalPcs===0) return;
@@ -1589,12 +1609,21 @@ function PgCutOrder({ data, setData, reload, tenantId }) {
     const td=new Date(TODAY+"T12:00:00"); const dd=String(td.getDate()).padStart(2,"0"); const mm=String(td.getMonth()+1).padStart(2,"0"); const aa=String(td.getFullYear()).slice(-2);
     const seq=String(data.productions.filter(p=>p.no&&p.no.startsWith("OP"+dd+mm+aa)).length+1).padStart(2,"0");
     const no="OP"+dd+mm+aa+"-"+seq;
-    const enriched=qtys.map(q=>{const cf=pr.colorFabrics?.find(c=>c.color===q.color);const rm=rawMaterials.find(r=>r.id===cf?.rmId);return{...q,rmId:cf?.rmId,rmName:rm?.desc,fab:cFab(q.color,q.size,q.qty)};});
+    const enriched=qtys.map(q=>{
+      const cf=pr.colorFabrics?.find(c=>c.color===q.color);
+      const rm=rawMaterials.find(r=>r.id===cf?.rmId);
+      const fi=forroItems.find(f=>f.color===q.color);
+      const forroRm=fi?rawMaterials.find(r=>r.id==fi.rmId):null;
+      const forroFab=fi?(fi.cons?.[q.size]||0)*q.qty:0;
+      return{...q,rmId:cf?.rmId,rmName:rm?.desc,fab:cFab(q.color,q.size,q.qty),forroRmId:fi?.rmId||null,forroRmName:forroRm?.desc||null,forroFab};
+    });
     const totalFab=enriched.reduce((s,q)=>s+(q.fab||0),0);
     const matC=matEst(), cutC=cutEst();
     const trimC=(pr.trimUsage||[]).reduce((s,tu)=>{const t=data.trims.find(t=>t.id===tu.trimId);return s+(t?.avgCost||0)*tu.qty*totalPcs;},0);
     const fabConsumed = {};
     enriched.forEach(q=>{ if(q.rmId){ fabConsumed[q.rmId]=(fabConsumed[q.rmId]||0)+(q.fab||0); } });
+    // Adicionar consumo do forro ao fabConsumed
+    enriched.forEach(q=>{ if(q.forroRmId){ fabConsumed[q.forroRmId]=(fabConsumed[q.forroRmId]||0)+(q.forroFab||0); } });
     const fabByColor = {};
     enriched.forEach(q=>{ if(q.rmId){ if(!fabByColor[q.rmId])fabByColor[q.rmId]={}; fabByColor[q.rmId][q.color]=(fabByColor[q.rmId][q.color]||0)+(q.fab||0); } });
     const trimConsumed = {};
@@ -1625,7 +1654,7 @@ function PgCutOrder({ data, setData, reload, tenantId }) {
       }
       setData(d=>({...d,productions:[...d.productions,savedProd],payables:[...d.payables,savedPay]}));
       doPrint(savedProd,pr,"Corte",outsourced);
-      setPid("");setQtys([]);setCw("");setSw("");setFw("");setSd(TODAY);setShowNew(false);
+      setPid("");setQtys([]);setCw("");setSw("");setFw("");setSd(TODAY);setShowNew(false);setForroEnabled(false);setForroItems([]);
       showToast("OP "+no+" criada · estoque atualizado.","ok");
     } catch(e){ showToast("Erro ao criar OP: "+e.message,"err"); }
   };
@@ -1716,6 +1745,50 @@ function PgCutOrder({ data, setData, reload, tenantId }) {
                     <strong style={{color:DS.blue,fontVariantNumeric:"tabular-nums"}}>{total.toFixed(2)}m</strong>
                   </div>
                 ))}
+                {forroEnabled&&forroFabSum().map(({rm,total})=>(
+                  <div key={"forro-"+rm?.id} style={{display:"flex",justifyContent:"space-between",fontSize:12,marginBottom:4}}>
+                    <span style={{color:DS.pu}}>Forro: {rm?.desc}</span>
+                    <strong style={{color:DS.pu,fontVariantNumeric:"tabular-nums"}}>{total.toFixed(2)}m</strong>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Forro opcional */}
+            {sp&&totalPcs>0&&(
+              <div>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                  <Lbl ch="Forro (opcional)"/>
+                  <button onClick={()=>{setForroEnabled(e=>!e);setForroItems([]);}} style={{fontSize:12,padding:"4px 10px",borderRadius:DS.r8,border:`1px solid ${DS.bd}`,background:forroEnabled?DS.ink:"transparent",color:forroEnabled?"#fff":DS.i2,cursor:"pointer",fontFamily:"inherit",fontWeight:500}}>
+                    {forroEnabled?"Remover forro":"+ Adicionar forro"}
+                  </button>
+                </div>
+                {forroEnabled&&(
+                  <div style={{display:"flex",flexDirection:"column",gap:12,background:DS.surEl,borderRadius:DS.r10,padding:14}}>
+                    <div style={{fontSize:12,color:DS.i3}}>Selecione o tecido de forro e o consumo por tamanho para cada cor que utiliza forro.</div>
+                    {sp.colorFabrics?.map(cf=>{
+                      const fi=getForroItem(cf.color);
+                      return (
+                        <div key={cf.color} style={{background:DS.sur,borderRadius:DS.r8,padding:"10px 12px",border:`1px solid ${DS.bd}`}}>
+                          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:10}}>
+                            <span style={{fontSize:13,fontWeight:600,color:DS.i1}}>{cf.color}</span>
+                            <Sel label="" value={fi?.rmId||""} onChange={v=>setForroRm(cf.color,v)} options={[{v:"",l:"Sem forro"},...rawMaterials.map(r=>({v:r.id,l:r.desc+" ("+r.code+")"}))]}/> 
+                          </div>
+                          {fi?.rmId&&(
+                            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                              {sp.sizes?.map(sz=>(
+                                <div key={sz} style={{display:"flex",flexDirection:"column",alignItems:"center",gap:4}}>
+                                  <span style={{fontSize:10,color:DS.i3}}>{sz}</span>
+                                  <input type="number" min="0" step="0.01" value={fi.cons?.[sz]||""} onChange={e=>setForroCons(cf.color,sz,e.target.value)} placeholder="0m" style={{width:52,height:30,padding:"0 4px",borderRadius:DS.r6,border:`1px solid ${DS.bd}`,textAlign:"center",fontSize:12,fontFamily:"inherit",outline:"none"}}/>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             )}
           </>}
@@ -2150,7 +2223,54 @@ function PgPurchases({ data, setData, reload, tenantId }) {
   const nParcelas = parseInt(form.parcelas)||1;
   const parcelaVal = totalVal/nParcelas;
 
-  // doSave: async version below;
+  // doSave — salva compra no Supabase e atualiza estoque
+  const doSave = async () => {
+    if(!form.itemId||!form.qty||!form.price||!form.sup){ showToast("Preencha todos os campos obrigatórios.","err"); return; }
+    const total = totalVal;
+    const isNew = !ed;
+    const catLabel = form.type==="rm" ? "Tecidos" : "Aviamentos";
+    try {
+      // 1. Salvar compra
+      const purchData = {...form, qty:parseFloat(form.qty), price:parseFloat(form.price), total, parcelas:nParcelas};
+      const savedPurch = await sb.savePurch(purchData, tenantId);
+      // 2. Atualizar estoque (só nova compra)
+      if(isNew){
+        if(form.type==="rm"){
+          const m=data.rawMaterials.find(x=>x.id==form.itemId||x.id===form.itemId);
+          if(m){
+            const newHist=[...(m.hist||[]),{date:form.date,qty:parseFloat(form.qty),price:parseFloat(form.price)}];
+            const newAvg=mean(newHist.map(p=>p.price));
+            let newColors=m.colors||[];
+            if(form.color&&Array.isArray(newColors)){
+              newColors=newColors.map(c=>c.name===form.color?{...c,stock:(c.stock||0)+parseFloat(form.qty)}:c);
+            }
+            const updRM=await sb.saveRM({...m,stock:(m.stock||0)+parseFloat(form.qty),avgCost:newAvg,hist:newHist,colors:newColors},tenantId);
+            setData(d=>({...d,rawMaterials:d.rawMaterials.map(x=>x.id===updRM.id?updRM:x)}));
+          }
+        } else {
+          const t=data.trims.find(x=>x.id==form.itemId||x.id===form.itemId);
+          if(t){
+            const newHist=[...(t.hist||[]),{date:form.date,qty:parseFloat(form.qty),price:parseFloat(form.price)}];
+            const updTrim=await sb.saveTrim({...t,stock:(t.stock||0)+parseFloat(form.qty),avgCost:mean(newHist.map(p=>p.price)),hist:newHist},tenantId);
+            setData(d=>({...d,trims:d.trims.map(x=>x.id===updTrim.id?updTrim:x)}));
+          }
+        }
+        // 3. Gerar contas a pagar
+        if(form.pay!=="À Vista"){
+          const payArr=[];
+          for(let i=0;i<nParcelas;i++){
+            const dueD=(form.parcelaDates&&form.parcelaDates[i])?form.parcelaDates[i]:(form.due?addD(form.due,i*30):addD(TODAY,(i+1)*30));
+            payArr.push({desc:form.item+" — Parcela "+(i+1)+"/"+nParcelas,cat:catLabel,sup:form.sup,phone:form.phone,amt:Math.round(parcelaVal*100)/100,due:dueD,paid:null,status:"Pendente",prodId:null,purchaseId:savedPurch.id,notes:nParcelas+"x de "+R(parcelaVal)});
+          }
+          const savedPays=await sb.insertPayBatch(payArr,tenantId);
+          setData(d=>({...d,payables:[...d.payables,...savedPays]}));
+        }
+      }
+      setData(d=>({...d,purchases:isNew?[...d.purchases,savedPurch]:d.purchases.map(p=>p.id===savedPurch.id?savedPurch:p)}));
+      setShowF(false);setEd(null);setForm(EF);
+      showToast(isNew?"Compra registrada com sucesso.":"Compra atualizada.","ok");
+    } catch(e){ showToast("Erro ao salvar: "+e.message,"err"); }
+  };
 
   // Cascade: delete purchase AND its generated payables
   const delPurch = (id,e) => { e.stopPropagation(); confirmDelete(async()=>{try{await sb.deletePurch(id);await sb.deletePaysByPurchase(id);setData(d=>({...d,purchases:d.purchases.filter(p=>p.id!==id),payables:d.payables.filter(p=>p.purchaseId!==id)}));}catch(er){showToast("Erro: "+er.message,"err");}},{title:"Excluir compra",message:"A compra e as contas a pagar geradas por ela serão excluídas. Esta ação não pode ser desfeita."}); };
