@@ -33,7 +33,8 @@ const GLOBAL_CSS = `
 @keyframes cf-rise { from { opacity:0; transform:translateY(8px) } to { opacity:1; transform:translateY(0) } }
 @keyframes cf-scale { from { opacity:0; transform:scale(0.97) } to { opacity:1; transform:scale(1) } }
 @keyframes cf-slideUp { from { opacity:0; transform:translateY(16px) } to { opacity:1; transform:translateY(0) } }
-* { -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility; }
+* { box-sizing:border-box; -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility; }
+html, body { margin:0; padding:0; max-width:100%; overflow-x:hidden; }
 *::-webkit-scrollbar { width:10px; height:10px; }
 *::-webkit-scrollbar-thumb { background:rgba(0,0,0,0.12); border-radius:8px; border:2px solid transparent; background-clip:padding-box; }
 *::-webkit-scrollbar-thumb:hover { background:rgba(0,0,0,0.22); background-clip:padding-box; }
@@ -569,15 +570,28 @@ function Modal({ open, onClose, title, children, width=560, noPad=false }) {
   useEffect(function(){ document.body.style.overflow=open?"hidden":""; return()=>{document.body.style.overflow=""}; },[open]);
   if (!open) return null;
   return (
-    <div style={{ position:"fixed",top:0,left:0,right:0,bottom:0,zIndex:1000,background:"rgba(12,12,11,.22)",backdropFilter:"blur(3px)",WebkitBackdropFilter:"blur(3px)",overflowY:"auto",WebkitOverflowScrolling:"touch" }} onClick={onClose}>
-      <div style={{padding:"24px 16px 60px",display:"flex",justifyContent:"center"}}>
-        <div onClick={e=>e.stopPropagation()} style={{ background:DS.sur,borderRadius:DS.r20,width:"100%",maxWidth:width,boxShadow:DS.e4,border:`1px solid ${DS.bd}`,animation:`cf-scale ${DS.base} both` }}>
-          <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",padding:"16px 20px",borderBottom:`1px solid ${DS.bd}` }}>
-            <span style={{ fontSize:17,fontWeight:700,color:DS.i1,letterSpacing:"-.3px" }}>{title}</span>
-            <IBt icon={<svg width="15" height="15" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="2"><path d="M1 1l12 12M13 1L1 13"/></svg>} onClick={onClose}/>
-          </div>
-          <div style={{ padding:noPad?0:"20px" }}>{children}</div>
+    <div
+      onClick={onClose}
+      style={{
+        position:"fixed", inset:0,
+        zIndex:1000, background:"rgba(12,12,11,.22)",
+        backdropFilter:"blur(3px)", WebkitBackdropFilter:"blur(3px)",
+        overflowY:"auto", overflowX:"hidden", WebkitOverflowScrolling:"touch",
+        boxSizing:"border-box"
+      }}>
+      <div
+        onClick={e=>e.stopPropagation()}
+        style={{
+          background:DS.sur, borderRadius:DS.r20,
+          width:"calc(100% - 32px)", maxWidth:width, margin:"40px auto",
+          boxShadow:DS.e4, border:`1px solid ${DS.bd}`,
+          animation:`cf-scale ${DS.base} both`
+        }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"16px 20px", borderBottom:`1px solid ${DS.bd}` }}>
+          <span style={{ fontSize:17, fontWeight:700, color:DS.i1, letterSpacing:"-.3px" }}>{title}</span>
+          <IBt icon={<svg width="15" height="15" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="2"><path d="M1 1l12 12M13 1L1 13"/></svg>} onClick={onClose}/>
         </div>
+        <div style={{ padding:noPad?0:"20px" }}>{children}</div>
       </div>
     </div>
   );
@@ -2601,16 +2615,20 @@ function PgProducts({ data, setData, reload, tenantId }) {
   const addCF = () => setForm(p=>({...p,colorFabrics:[...p.colorFabrics,{color:"",rmId:"",cons:{}}]}));
   const remCF = i => setForm(p=>({...p,colorFabrics:p.colorFabrics.filter((_,j)=>j!==i)}));
   const setCFcol = (i,v)=>setForm(p=>({...p,colorFabrics:p.colorFabrics.map((cf,j)=>j===i?{...cf,color:v}:cf)}));
-  const setCFrm  = (i,v)=>setForm(p=>({...p,colorFabrics:p.colorFabrics.map((cf,j)=>j===i?{...cf,rmId:parseInt(v)||""}:cf)}));
+  const setCFrm  = (i,v)=>setForm(p=>({...p,colorFabrics:p.colorFabrics.map((cf,j)=>j===i?{...cf,rmId:v||""}:cf)}));
   const setCFcons= (i,sz,v)=>setForm(p=>({...p,colorFabrics:p.colorFabrics.map((cf,j)=>j===i?{...cf,cons:{...cf.cons,[sz]:parseFloat(v)||0}}:cf)}));
   const setTrimQty = (trimId,qty) => setForm(p=>({...p,trimUsage:p.trimUsage.map(tu=>tu.trimId===trimId?{...tu,qty:qty}:tu)}));
   const togTrim = id => setForm(p=>{const has=p.trimUsage.find(tu=>tu.trimId===id);return{...p,trimUsage:has?p.trimUsage.filter(tu=>tu.trimId!==id):[...p.trimUsage,{trimId:id,qty:1}]};});
-  const delProd = (id,e) => {e.stopPropagation();confirmDelete(()=>setData(d=>({...d,products:d.products.filter(p=>p.id!==id)})),{title:"Excluir produto"});};
-  const doSave = () => {
+  const delProd = (id,e) => {e.stopPropagation();confirmDelete(async()=>{try{await sb.deleteProduct(id);setData(d=>({...d,products:d.products.filter(p=>p.id!==id)}));}catch(er){showToast("Erro: "+er.message,"err");}},{title:"Excluir produto"});};
+  const doSave = async () => {
     const sizes=(form.sizes||"").split(",").map(s=>s.trim()).filter(Boolean);
     const prod={...(ed?{id:ed.id}:{}),sku:form.sku,name:form.name,category:form.category,collection:form.collection,sizes,colorFabrics:form.colorFabrics,trimUsage:form.trimUsage.map(tu=>({...tu,qty:parseInt(tu.qty)||0})).filter(tu=>tu.qty>0),cutPrice:parseFloat(form.cutPrice)||0,sewPrice:parseFloat(form.sewPrice)||0,finishPrice:parseFloat(form.finishPrice)||0};
-    setData(d=>({...d,products:ed?d.products.map(p=>p.id===prod.id?prod:p):[...d.products,prod]}));
-    setShowF(false);setEd(null);setForm(EF);
+    try{
+      const saved=await sb.saveProduct(prod,tenantId);
+      setData(d=>({...d,products:ed?d.products.map(p=>p.id===saved.id?saved:p):[...d.products,saved]}));
+      setShowF(false);setEd(null);setForm(EF);
+      showToast(ed?"Produto atualizado.":"Produto criado.","ok");
+    }catch(e){showToast("Erro: "+e.message,"err");}
   };
   const szList=(form.sizes||"").split(",").map(s=>s.trim()).filter(Boolean);
 
