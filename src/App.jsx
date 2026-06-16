@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { createPortal } from "react-dom";
 import { createClient } from "@supabase/supabase-js";
 
@@ -1946,7 +1946,7 @@ function PgFinancial({ data, setData, reload, tenantId, fInit }) {
   const [chatMsg,setChatMsg] = useState("");
   const [chatHistory,setChatHistory] = useState([]);
   const [chatLoading,setChatLoading] = useState(false);
-  const chatEndRef = React.useRef(null);
+  const chatEndRef = useRef(null);
   useEffect(function(){if(fInit)setFP(fInit);},[fInit]);
   useEffect(function(){chatEndRef.current?.scrollIntoView({behavior:"smooth"});},[chatHistory]);
 
