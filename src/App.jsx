@@ -1154,6 +1154,12 @@ function PgDash({ data, goTo, currentUser }) {
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:16,paddingBottom:4}}>
         <div style={{display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
           <h1 style={{margin:0,fontSize:isSmall?24:28,fontWeight:780,color:DS.i1,letterSpacing:"-.8px"}}>Dashboard</h1>
+          <button onClick={()=>goTo("financial")} style={{display:"inline-flex",alignItems:"center",gap:6,padding:"5px 12px",borderRadius:DS.r20,border:`1px solid ${DS.bd}`,background:"transparent",color:DS.i2,fontSize:12,fontWeight:500,cursor:"pointer",fontFamily:"inherit",transition:`all ${DS.fast}`}}
+            onMouseEnter={e=>{e.currentTarget.style.background=DS.sur;e.currentTarget.style.borderColor=DS.bdM;e.currentTarget.style.color=DS.i1;}}
+            onMouseLeave={e=>{e.currentTarget.style.background="transparent";e.currentTarget.style.borderColor=DS.bd;e.currentTarget.style.color=DS.i2;}}>
+            <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"><path d="M2 10V3a1 1 0 011-1h8a1 1 0 011 1v5a1 1 0 01-1 1H4l-2 2z"/></svg>
+            Chat financeiro
+          </button>
           {overdue.length>0 && <span style={{display:"inline-flex",alignItems:"center",gap:6,padding:"4px 10px",borderRadius:DS.r20,background:DS.errSft,color:DS.err,fontSize:12,fontWeight:600}}><span style={{width:6,height:6,borderRadius:"50%",background:DS.err}}/>{overdue.length} atrasada(s)</span>}
         </div>
         <div style={{maxWidth:"100%",overflowX:"auto"}}><PeriodSelector value={period} onChange={setPeriod} customFrom={cfrom} customTo={cto} onFromChange={setCfrom} onToChange={setCto}/></div>
@@ -1936,9 +1942,127 @@ function PgFinancial({ data, setData, reload, tenantId, fInit }) {
   const [fPer,setFP] = useState(fInit||"all");
   const [sel,setSel] = useState(null);
   const [showF,setShowF] = useState(false);
+  const [showChat,setShowChat] = useState(false);
+  const [chatMsg,setChatMsg] = useState("");
+  const [chatHistory,setChatHistory] = useState([]);
+  const [chatLoading,setChatLoading] = useState(false);
+  const chatEndRef = React.useRef(null);
   useEffect(function(){if(fInit)setFP(fInit);},[fInit]);
+  useEffect(function(){chatEndRef.current?.scrollIntoView({behavior:"smooth"});},[chatHistory]);
 
-  const CATEGORIAS = ["Aluguel","Salários","Energia","Água","Internet/Telefone","Impostos","Matéria-prima","Manutenção","Marketing","Outros"];
+  const CATEGORIAS = ["Aluguel","Salários","Energia","Água","Internet/Telefone","Impostos","Matéria-prima","Aviamentos","Manutenção","Marketing","Outros"];
+
+  // ── Parser local (sem IA) ──
+  const parseMsg = (msg) => {
+    const lines = msg.split("\n").map(l=>l.trim()).filter(Boolean);
+    const lancamentos = [];
+
+    const catMap = {
+      "aluguel":["aluguel","locação","locacao","imóvel","imovel"],
+      "Salários":["salário","salario","funcionário","funcionario","pagamento de pessoal","folha"],
+      "Energia":["energia","luz","eletric"],
+      "Água":["água","agua","saneamento"],
+      "Internet/Telefone":["internet","telefone","celular","plano","tim","vivo","claro","oi"],
+      "Impostos":["imposto","tax","das","mei","inss","nota fiscal"],
+      "Aviamentos":["ziper","zipper","zíper","elástico","elastico","botão","botao","linha","fio","fita","rebite","ilhós","viés","vies","etiqueta","aviamento","fecho","velcro","colchete"],
+      "Matéria-prima":["tecido","malha","helanca","oxford","jeans","tricoline","voil","viscose","forro","feltro","neoprene"],
+      "Manutenção":["manutenção","manutencao","conserto","reparo","peça","peca"],
+      "Marketing":["marketing","publicidade","anuncio","anúncio","instagram","facebook"],
+    };
+
+    const detectCat = (txt) => {
+      const lower = txt.toLowerCase();
+      for(const [cat, words] of Object.entries(catMap)){
+        if(words.some(w=>lower.includes(w))) return cat;
+      }
+      return "Outros";
+    };
+
+    const parseDue = (txt) => {
+      const lower = txt.toLowerCase();
+      // "vence dia X" ou "dia X"
+      const diaMatch = lower.match(/(?:vence\s+)?dia\s+(\d{1,2})/);
+      if(diaMatch){
+        const dia = parseInt(diaMatch[1]);
+        const now = new Date(TODAY+"T12:00:00");
+        let d = new Date(now.getFullYear(), now.getMonth(), dia);
+        if(d <= now) d = new Date(now.getFullYear(), now.getMonth()+1, dia);
+        return d.toISOString().split("T")[0];
+      }
+      // "vence DD/MM" ou "DD/MM"
+      const dateMatch = lower.match(/(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?/);
+      if(dateMatch){
+        const [,dd,mm,yy] = dateMatch;
+        const year = yy ? (yy.length===2?"20"+yy:yy) : new Date().getFullYear();
+        return `${year}-${mm.padStart(2,"0")}-${dd.padStart(2,"0")}`;
+      }
+      return TODAY;
+    };
+
+    const parseAmt = (txt) => {
+      // Encontra valor numérico: 1.500,00 ou 1500,00 ou 1500.00 ou 1500
+      const m = txt.match(/(\d{1,3}(?:\.\d{3})*(?:,\d{1,2})?|\d+(?:,\d{1,2})?(?:\.\d{1,2})?)/);
+      if(!m) return 0;
+      let v = m[1];
+      // Formato brasileiro: 1.500,00
+      if(v.includes(".") && v.includes(",")) v = v.replace(".","").replace(",",".");
+      // Só vírgula: 40,00
+      else if(v.includes(",")) v = v.replace(",",".");
+      return parseFloat(v)||0;
+    };
+
+    const cleanDesc = (txt, amt) => {
+      // Remove o valor do texto para ficar só a descrição
+      let d = txt
+        .replace(/(\d{1,3}(?:\.\d{3})*(?:,\d{1,2})?|\d+(?:,\d{1,2})?)/g,"")
+        .replace(/vence\s+dia\s+\d{1,2}/gi,"")
+        .replace(/dia\s+\d{1,2}/gi,"")
+        .replace(/\d{1,2}\/\d{1,2}(?:\/\d{2,4})?/g,"")
+        .replace(/\s{2,}/g," ")
+        .trim();
+      return d || txt.trim();
+    };
+
+    for(const line of lines){
+      const amt = parseAmt(line);
+      if(amt <= 0) continue;
+      const due = parseDue(line);
+      const desc = cleanDesc(line, amt);
+      const cat = detectCat(line);
+      lancamentos.push({desc, amt, cat, due, sup:""});
+    }
+
+    return lancamentos;
+  };
+
+  const sendChat = async () => {
+    if(!chatMsg.trim()||chatLoading) return;
+    const msg = chatMsg.trim();
+    setChatMsg("");
+    setChatHistory(h=>[...h,{role:"user",text:msg}]);
+    setChatLoading(true);
+    try {
+      const lancamentos = parseMsg(msg);
+      if(lancamentos.length===0) throw new Error("Não encontrei nenhum valor. Tente: '40,00 Ziper 20cm'");
+
+      const saved = await sb.insertPayBatch(
+        lancamentos.map(l=>({
+          desc:l.desc, cat:l.cat, sup:"", phone:"",
+          amt:l.amt, due:l.due, paid:null, status:"Pendente",
+          prodId:null, notes:"Lançado via chat"
+        })),
+        tenantId
+      );
+      setData(d=>({...d,payables:[...d.payables,...saved]}));
+
+      const preview = lancamentos.map(l=>`✓ ${l.desc} — ${R(l.amt)} · ${l.cat} · vence ${FD(l.due)}`).join("\n");
+      setChatHistory(h=>[...h,{role:"ai",text:`${lancamentos.length} conta(s) lançada(s):\n\n${preview}`,ok:true}]);
+    } catch(e){
+      setChatHistory(h=>[...h,{role:"ai",text:"Não entendi. Tente assim:\n40,00 Ziper 20cm\n500 elástico vence dia 20\naluguel 1800",ok:false}]);
+    }
+    setChatLoading(false);
+  };
+
   const EF = {desc:"",cat:"Aluguel",sup:"",phone:"",amt:"",due:TODAY,tipo:"avulsa",parcelas:"2",recMeses:"6"};
   const [form,setForm] = useState(EF);
   const fld = k => v => setForm(p=>({...p,[k]:v}));
@@ -1988,7 +2112,12 @@ function PgFinancial({ data, setData, reload, tenantId, fInit }) {
 
   return (
     <div>
-      <SH title="Financeiro" action={<Btn onClick={()=>{setForm(EF);setShowF(true);}}>+ Nova despesa</Btn>}/>
+      <SH title="Financeiro" action={
+        <div style={{display:"flex",gap:8}}>
+          <Btn v="secondary" onClick={()=>setShowChat(true)}>💬 Chat rápido</Btn>
+          <Btn onClick={()=>{setForm(EF);setShowF(true);}}>+ Nova despesa</Btn>
+        </div>
+      }/>
       {/* Summary row */}
       <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10,marginBottom:24}}>
         {[
@@ -2058,6 +2187,56 @@ function PgFinancial({ data, setData, reload, tenantId, fInit }) {
             </div>
           );
         })()}
+      </Modal>
+
+      {/* Chat rápido com IA */}
+      <Modal open={showChat} onClose={()=>setShowChat(false)} title="💬 Chat financeiro" width={500}>
+        <div style={{display:"flex",flexDirection:"column",gap:0}}>
+          <div style={{fontSize:12,color:DS.i3,marginBottom:12,lineHeight:1.6,background:DS.surEl,borderRadius:DS.r8,padding:"10px 12px"}}>
+            Digite os lançamentos como se fosse WhatsApp. A IA entende e cria as contas automaticamente.<br/>
+            <strong>Exemplos:</strong> "40,00 Ziper 20cm" · "500 elástico vence dia 20" · "aluguel 1800"
+          </div>
+          {/* Histórico */}
+          <div style={{minHeight:200,maxHeight:320,overflowY:"auto",display:"flex",flexDirection:"column",gap:10,marginBottom:12,padding:"4px 0"}}>
+            {chatHistory.length===0&&(
+              <div style={{textAlign:"center",color:DS.i4,fontSize:13,padding:"40px 0"}}>Nenhuma mensagem ainda.<br/>Digite abaixo para começar.</div>
+            )}
+            {chatHistory.map((m,i)=>(
+              <div key={i} style={{display:"flex",justifyContent:m.role==="user"?"flex-end":"flex-start"}}>
+                <div style={{
+                  maxWidth:"85%",padding:"10px 14px",borderRadius:m.role==="user"?"16px 16px 4px 16px":"16px 16px 16px 4px",
+                  background:m.role==="user"?DS.ink:(m.ok?DS.okSft:DS.errSft),
+                  color:m.role==="user"?"#fff":(m.ok?DS.ok:DS.err),
+                  border:m.role!=="user"?`1px solid ${m.ok?DS.okBd:DS.errBd}`:"none",
+                  fontSize:13,lineHeight:1.6,whiteSpace:"pre-wrap"
+                }}>{m.text}</div>
+              </div>
+            ))}
+            {chatLoading&&(
+              <div style={{display:"flex",justifyContent:"flex-start"}}>
+                <div style={{padding:"10px 14px",borderRadius:"16px 16px 16px 4px",background:DS.surEl,color:DS.i3,fontSize:13}}>
+                  Analisando...
+                </div>
+              </div>
+            )}
+            <div ref={chatEndRef}/>
+          </div>
+          {/* Input */}
+          <div style={{display:"flex",gap:8,alignItems:"flex-end"}}>
+            <textarea
+              value={chatMsg}
+              onChange={e=>setChatMsg(e.target.value)}
+              onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendChat();}}}
+              placeholder={"40,00 Ziper 20cm\n500 elástico vence dia 20"}
+              rows={3}
+              style={{flex:1,padding:"10px 12px",borderRadius:DS.r10,border:`1px solid ${DS.bd}`,fontSize:13,fontFamily:"inherit",resize:"none",outline:"none",lineHeight:1.6,background:DS.sur,color:DS.i1}}
+            />
+            <Btn onClick={sendChat} disabled={chatLoading||!chatMsg.trim()} style={{height:44,paddingLeft:20,paddingRight:20}}>
+              {chatLoading?"...":"Enviar"}
+            </Btn>
+          </div>
+          <div style={{fontSize:11,color:DS.i4,marginTop:6}}>Enter para enviar · Shift+Enter para nova linha</div>
+        </div>
       </Modal>
 
       {/* Formulário de nova despesa */}
