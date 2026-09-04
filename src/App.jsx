@@ -117,6 +117,10 @@ const normalizePurch = r => ({
   qty:Number(r.qty||0), price:Number(r.unit_price||0), total:Number(r.total||0),
   pay:r.payment_method, parcelas:r.installments, date:r.purchase_date, notes:r.notes
 });
+const normalizeRevenue = r => ({
+  id:r.id, month:r.month, goal:Number(r.goal||0),
+  channels:r.channels||[], expenses:r.expenses||[], notes:r.notes
+});
 const normalizeProfile = r => ({
   id:r.id, name:r.name, username:r.username, role:r.role, active:r.active, tenant_id:r.tenant_id
 });
@@ -153,8 +157,9 @@ const sb = {
       supabase.from("payables").select("*").order("due_date"),
       supabase.from("purchases").select("*").order("purchase_date",{ascending:false}),
       supabase.from("profiles").select("*").order("name"),
+      supabase.from("cf_revenue").select("*").order("month",{ascending:false}),
     ]);
-    const err=[e1,e2,e3,e4,e5,e6,e7,e8].find(Boolean);
+    const err=[e1,e2,e3,e4,e5,e6,e7,e8,e9].find(Boolean);
     if(err)throw err;
     return {
       products:(products||[]).map(normalizeProduct),
@@ -165,6 +170,7 @@ const sb = {
       payables:(payables||[]).map(normalizePay),
       purchases:(purchases||[]).map(normalizePurch),
       users:(users||[]).map(normalizeProfile),
+      revenue:(revenue||[]).map(normalizeRevenue),
     };
   },
 
@@ -263,7 +269,9 @@ const sb = {
     const row={tenant_id:tenantId,type:d.type,item_id:d.itemId||null,item_name:d.item,
       color:d.color||null,supplier:d.sup,phone:d.phone,qty:d.qty,unit_price:d.price,
       total:d.total,payment_method:d.pay,installments:d.parcelas,purchase_date:d.date,notes:d.notes};
-    const{data,error}=await supabase.from("purchases").insert(row).select().single();
+    if(d.id) row.id=d.id;
+    const{data,error}=await supabase.from("purchases")
+      .upsert(row,{onConflict:"id"}).select().single();
     if(error)throw error; return normalizePurch(data);
   },
   async deletePurch(id){ const{error}=await supabase.from("purchases").delete().eq("id",id); if(error)throw error; },
@@ -275,6 +283,18 @@ const sb = {
     if(error)throw error; return normalizeProfile(data);
   },
   async deleteProfile(id){ const{error}=await supabase.from("profiles").delete().eq("id",id); if(error)throw error; },
+
+  // Faturamento por marketplace
+  async saveRevenue(d,tenantId){
+    const row={tenant_id:tenantId,month:d.month,goal:d.goal,
+      channels:d.channels||[],expenses:d.expenses||[],notes:d.notes,...(d.id&&{id:d.id})};
+    const{data,error}=await supabase.from("cf_revenue")
+      .upsert(row,{onConflict:d.id?"id":"tenant_id,month"}).select().single();
+    if(error)throw error; return normalizeRevenue(data);
+  },
+  async deleteRevenue(id){
+    const{error}=await supabase.from("cf_revenue").delete().eq("id",id); if(error)throw error;
+  },
 
   // Stock movements
   async logMovement(m,tenantId){
@@ -290,7 +310,7 @@ const sb = {
 // Empty state (replaces SEED for production)
 const EMPTY = {
   products:[], rawMaterials:[], trims:[], outsourced:[],
-  productions:[], payables:[], purchases:[], users:[],
+  productions:[], payables:[], purchases:[], users:[], revenue:[],
 };
 
 
@@ -308,19 +328,28 @@ const isWK  = d => d && d >= TODAY && d <= addD(TODAY,7);
 const isMO  = d => d && d >= TODAY && d.slice(0,7) === TODAY.slice(0,7);
 const isTD  = d => d === TODAY;
 const mean  = a => a.length ? a.reduce((x,y)=>x+y,0)/a.length : 0;
-/* Custo médio ponderado pela quantidade.
-   Ignora lançamentos sem preço (ex.: saldo inicial cadastrado com custo 0),
-   que antes puxavam a média para baixo. */
-const weightedAvg = hist => {
-  const valid=(hist||[]).filter(h=>Number(h.price)>0&&Number(h.qty)>0);
-  if(!valid.length){
-    const anyPrice=(hist||[]).filter(h=>Number(h.price)>0);
-    return anyPrice.length?mean(anyPrice.map(h=>Number(h.price))):0;
-  }
-  const totalQty=valid.reduce((s,h)=>s+Number(h.qty),0);
-  const totalVal=valid.reduce((s,h)=>s+Number(h.qty)*Number(h.price),0);
-  return totalQty>0?totalVal/totalQty:0;
+/* ─── CUSTO MÉDIO ────────────────────────────────────────────────
+   As compras registradas são a única fonte da verdade.
+   Média ponderada: soma(qtd × preço) ÷ soma(qtd).
+   Ex.: 1.000m a R$7,00 + 1.000m a R$8,00 = R$7,50/m
+        1.000m a R$7,00 +   500m a R$8,00 = R$7,33/m
+   ──────────────────────────────────────────────────────────────── */
+const avgFromPurchases = (purchases, itemId, tipo) => {
+  const list=(purchases||[]).filter(p=>
+    String(p.itemId)===String(itemId) &&
+    (!tipo||p.type===tipo) &&
+    Number(p.qty)>0 && Number(p.price)>0
+  );
+  if(!list.length) return null;                  // sem compras: mantém o valor manual
+  const q=list.reduce((s,p)=>s+Number(p.qty),0);
+  const v=list.reduce((s,p)=>s+Number(p.qty)*Number(p.price),0);
+  return q>0 ? v/q : null;
 };
+/* Histórico legível de compras de um item */
+const purchaseHistory = (purchases, itemId, tipo) =>
+  (purchases||[])
+    .filter(p=>String(p.itemId)===String(itemId)&&(!tipo||p.type===tipo))
+    .sort((a,b)=>(b.date||"").localeCompare(a.date||""));
 const pct   = (v,t) => t > 0 ? Math.round((v/t)*100) : 0;
 const uid   = a => (a.length ? Math.max(...a.map(x=>x.id)) : 0)+1;
 
@@ -375,45 +404,9 @@ const getAlerts = data => {
   return out;
 };
 
-/* Devolve ao estoque tudo que a ordem consumiu (tecido, forro e aviamentos).
-   Usado ao excluir uma produção. */
-async function restoreStock(prod, data, tenantId, setData){
-  if(!prod) return;
-  const fab={};   // rmId -> metros
-  const byColor={}; // rmId -> {cor: metros}
-  (prod.qtys||[]).forEach(q=>{
-    if(q.rmId){
-      fab[q.rmId]=(fab[q.rmId]||0)+(q.fab||0);
-      if(!byColor[q.rmId]) byColor[q.rmId]={};
-      byColor[q.rmId][q.color]=(byColor[q.rmId][q.color]||0)+(q.fab||0);
-    }
-    if(q.forroRmId){
-      fab[q.forroRmId]=(fab[q.forroRmId]||0)+(q.forroFab||0);
-    }
-  });
-  const product=data.products.find(x=>x.id===prod.productId);
-  const trims={};
-  (product?.trimUsage||[]).forEach(tu=>{
-    trims[tu.trimId]=(trims[tu.trimId]||0)+(tu.qty||0)*(prod.total||0);
-  });
-
-  for(const rmId of Object.keys(fab)){
-    const m=data.rawMaterials.find(x=>x.id==rmId);
-    if(!m) continue;
-    const colors=(m.colors||[]).map(c=>{
-      const back=(byColor[rmId]||{})[c.name]||0;
-      return back>0?{...c,stock:(c.stock||0)+back}:c;
-    });
-    const upd=await sb.saveRM({...m,stock:(m.stock||0)+fab[rmId],colors},tenantId);
-    setData(d=>({...d,rawMaterials:d.rawMaterials.map(x=>x.id==rmId?upd:x)}));
-  }
-  for(const [tid,qty] of Object.entries(trims)){
-    const t=data.trims.find(x=>x.id==tid);
-    if(!t) continue;
-    const upd=await sb.saveTrim({...t,stock:(t.stock||0)+qty},tenantId);
-    setData(d=>({...d,trims:d.trims.map(x=>x.id==tid?upd:x)}));
-  }
-}
+/* O sistema não controla mais quantidade em estoque.
+   Mantido como no-op para não quebrar as chamadas existentes. */
+async function restoreStock(){ /* sem controle de quantidade */ }
 
 // PDF print — ficha de corte/costura/acabamento com grade estilo planilha
 const doPrint = (prod, product, step, outs) => {
@@ -665,8 +658,8 @@ function FichaHost(){
 // ROLE PERMISSIONS
 // ═══════════════════════════════════════════════════════════════════════════════
 const ROLE_PAGES = {
-  admin:      ["dashboard","cut-order","productions","products","stock","fabrics","trims","users","financial","agenda","outsourced","purchases"],
-  financial:  ["dashboard","financial","agenda","purchases"],
+  admin:      ["dashboard","cut-order","productions","products","stock","fabrics","trims","users","revenue","financial","agenda","outsourced","purchases"],
+  financial:  ["dashboard","revenue","financial","agenda","purchases"],
   production: ["dashboard","cut-order","productions","outsourced"],
   stock:      ["dashboard","stock","fabrics","trims","purchases"],
 };
@@ -1052,7 +1045,7 @@ function LoginPage({ onLogin }) {
 
   const stats = [
     {k:"Produção",v:"em tempo real"},
-    {k:"Estoque",v:"custo médio automático"},
+    {k:"Custos",v:"média das compras"},
     {k:"Financeiro",v:"contas e parcelas"},
   ];
 
@@ -1278,7 +1271,6 @@ function PgDash({ data, goTo, currentUser }) {
   const alerts = getAlerts(data);
   const alLate = alerts.filter(a=>a.msg.includes("atrasada")).length;
   const alDue  = alerts.filter(a=>a.msg.includes("Vencida")||a.msg.includes("Vence")).length;
-  const alStock= alerts.filter(a=>a.msg.includes("Estoque")).length;
 
   const paidInPeriod = payables.filter(p=>p.status==="Pago"&&inPeriod(p.paid));
   const totalPaid = paidInPeriod.reduce((s,p)=>s+p.amt,0);
@@ -1333,7 +1325,6 @@ function PgDash({ data, goTo, currentUser }) {
     finData.push({ l:FD(day).slice(0,5), v:Math.round(amt) });
   }
 
-  const critical = [...rawMaterials.map(m=>({...m,tp:"Tecido"})),...trims.map(t=>({...t,tp:"Aviamento"}))].filter(i=>i.stock<=i.min);
   const wsRanked = outsourced.filter(w=>w.status==="Ativo").map(w=>({...w,avg:mean(w.hist)})).sort((a,b)=>a.avg-b.avg);
 
   // ── Top products by size (period filtered) ──
@@ -1514,21 +1505,20 @@ function PgDash({ data, goTo, currentUser }) {
 
       {/* ── OPERATIONS ROW: Stock + Workshops ── */}
       <div style={{display:"grid",gridTemplateColumns:isMid?"1fr":"1fr 1fr",gap:isSmall?32:48,marginTop:48}}>
-        <Section label="Estoque" action={<button onClick={()=>goTo("stock")} style={linkBtn()}>Ver estoque →</button>}>
-          {critical.length===0
-            ? <div style={{fontSize:13,color:DS.i3,padding:"8px 0"}}>Estoque em dia</div>
+        <Section label="Custo médio dos tecidos" action={<button onClick={()=>goTo("fabrics")} style={linkBtn()}>Ver tecidos →</button>}>
+          {rawMaterials.length===0
+            ? <div style={{fontSize:13,color:DS.i3,padding:"8px 0"}}>Nenhum tecido cadastrado</div>
             : <div style={{display:"flex",flexDirection:"column",gap:0}}>
-                {critical.slice(0,6).map((item,i)=>(
-                  <div key={item.id+item.tp} onClick={()=>goTo("stock")} style={{display:"flex",alignItems:"center",gap:11,cursor:"pointer",padding:"11px 0",borderBottom:i<Math.min(critical.length,6)-1?`1px solid ${DS.bd}`:"none"}}>
-                    <span style={{width:7,height:7,borderRadius:"50%",background:DS.warn,flexShrink:0}}/>
+                {[...rawMaterials].sort((a,b)=>(b.avgCost||0)-(a.avgCost||0)).slice(0,6).map((item,i,arr)=>(
+                  <div key={item.id} onClick={()=>goTo("fabrics")} style={{display:"flex",alignItems:"center",gap:11,cursor:"pointer",padding:"11px 0",borderBottom:i<arr.length-1?`1px solid ${DS.bd}`:"none"}}>
                     <span style={{flex:1,fontSize:13.5,fontWeight:550,color:DS.i1,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{item.desc}</span>
-                    <span style={{fontSize:12.5,color:DS.warn,fontVariantNumeric:"tabular-nums",fontWeight:600}}>{item.stock}{item.unit}</span>
-                    <span style={{fontSize:11.5,color:DS.i3,fontVariantNumeric:"tabular-nums"}}>/ mín {item.min}{item.unit}</span>
+                    <span style={{fontSize:13,color:DS.i1,fontVariantNumeric:"tabular-nums",fontWeight:600}}>{R(item.avgCost||0)}</span>
+                    <span style={{fontSize:11.5,color:DS.i3}}>/{item.unit}</span>
                   </div>
                 ))}
-              </div>
-          }
+              </div>}
         </Section>
+
         <Section label="Performance das oficinas" action={<button onClick={()=>goTo("outsourced")} style={linkBtn()}>Ver todas →</button>}>
           {wsRanked.length===0
             ? <div style={{fontSize:13,color:DS.i3,padding:"8px 0"}}>Nenhuma oficina ativa</div>
@@ -1794,7 +1784,7 @@ function PgProductions({ data, setData, reload, tenantId, fInit }) {
                 {prod.status!=="Finalizado"&&<Btn onClick={()=>advance(prod)}>Avançar → {STEPS[STEPS.indexOf(prod.status)+1]}</Btn>}
                 <Btn v="secondary" icon={<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M3.5 5V1.5h7V5M3.5 10.5h-1a1 1 0 01-1-1V6a1 1 0 011-1h9a1 1 0 011 1v3.5a1 1 0 01-1 1h-1M3.5 8.5h7v4h-7z"/></svg>} onClick={()=>doPrint(prod,pr,prod.status,data.outsourced)}>Imprimir Ficha</Btn>
                 <Btn v="danger" icon={<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M2 3.5h10M5 3.5V2.5a.5.5 0 01.5-.5h3a.5.5 0 01.5.5v1M5.5 6v4M8.5 6v4M3 3.5l.7 8a1 1 0 001 .9h4.6a1 1 0 001-.9l.7-8"/></svg>}
-                  onClick={()=>confirmDelete(async()=>{try{await restoreStock(prod,data,tenantId,setData);await sb.deleteProd(prod.id);setData(d=>({...d,productions:d.productions.filter(p=>p.id!==prod.id),payables:d.payables.filter(p=>p.prodId!==prod.id)}));setSelId(null);showToast("Produção excluída e estoque devolvido.","ok");}catch(e){showToast("Erro: "+e.message,"err");}},{title:"Excluir produção",message:"A produção "+prod.no+" e as contas geradas por ela serão excluídas, e o tecido e os aviamentos consumidos voltarão ao estoque."})}>Excluir</Btn>
+                  onClick={()=>confirmDelete(async()=>{try{await sb.deleteProd(prod.id);setData(d=>({...d,productions:d.productions.filter(p=>p.id!==prod.id),payables:d.payables.filter(p=>p.prodId!==prod.id)}));setSelId(null);showToast("Produção excluída.","ok");}catch(e){showToast("Erro: "+e.message,"err");}},{title:"Excluir produção",message:"A produção "+prod.no+" e as contas geradas por ela serão excluídas. Esta ação não pode ser desfeita."})}>Excluir</Btn>
               </div>
             </div>
           );
@@ -1883,31 +1873,15 @@ function PgCutOrder({ data, setData, reload, tenantId }) {
       // 2. Save payable
       const nPay={desc:"Corte — "+no,cat:"Corte",sup:cw,phone:outsourced.find(o=>o.name===cw)?.phone||"",amt:cutC,due:addD(sd,30),paid:null,status:"Pendente",prodId:savedProd.id,notes:totalPcs+"pç × "+R(pr.cutPrice)};
       const savedPay = await sb.savePay(nPay, tenantId);
-      // 3. Update raw material stock
-      for(const rmId of Object.keys(fabConsumed)){
-        const m=rawMaterials.find(x=>x.id==rmId);
-        if(m){
-          const newColors=(m.colors||[]).map(c=>{ const used=(fabByColor[rmId]||{})[c.name]||0; return used>0?{...c,stock:(c.stock||0)-used}:c; });
-          const updRM=await sb.saveRM({...m,stock:m.stock-fabConsumed[rmId],colors:newColors},tenantId);
-          setData(d=>({...d,rawMaterials:d.rawMaterials.map(x=>x.id==rmId?updRM:x)}));
-        }
-      }
-      // 4. Update trim stock
-      for(const [trimId,consumed] of Object.entries(trimConsumed)){
-        const t=data.trims.find(x=>x.id==trimId);
-        if(t){
-          const updTrim=await sb.saveTrim({...t,stock:t.stock-consumed},tenantId);
-          setData(d=>({...d,trims:d.trims.map(x=>x.id==trimId?updTrim:x)}));
-        }
-      }
+      // Estoque não é mais controlado por quantidade — só o custo médio das compras importa.
       setData(d=>({...d,productions:[...d.productions,savedProd],payables:[...d.payables,savedPay]}));
       doPrint(savedProd,pr,"Corte",outsourced);
       setPid("");setQtys([]);setCw("");setSw("");setFw("");setSd(TODAY);setShowNew(false);setForroEnabled(false);setForroItems([]);
-      showToast("OP "+no+" criada · estoque atualizado.","ok");
+      showToast("OP "+no+" criada com sucesso.","ok");
     } catch(e){ showToast("Erro ao criar OP: "+e.message,"err"); }
   };
 
-  const delProd = (id,e) => { e.stopPropagation(); const prod=data.productions.find(p=>p.id===id); confirmDelete(async()=>{try{await restoreStock(prod,data,tenantId,setData);await sb.deleteProd(id);setData(d=>({...d,productions:d.productions.filter(p=>p.id!==id),payables:d.payables.filter(p=>p.prodId!==id)}));showToast("Ordem excluída e estoque devolvido.","ok");}catch(e){showToast("Erro: "+e.message,"err");}},{title:"Excluir ordem de corte",message:"A ordem e as contas geradas por ela serão excluídas, e o tecido e os aviamentos consumidos voltarão ao estoque."}); };
+  const delProd = (id,e) => { e.stopPropagation(); const prod=data.productions.find(p=>p.id===id); confirmDelete(async()=>{try{await sb.deleteProd(id);setData(d=>({...d,productions:d.productions.filter(p=>p.id!==id),payables:d.payables.filter(p=>p.prodId!==id)}));showToast("Ordem excluída.","ok");}catch(e){showToast("Erro: "+e.message,"err");}},{title:"Excluir ordem de corte",message:"A ordem e as contas geradas por ela serão excluídas. Esta ação não pode ser desfeita."}); };
 
   const activeProds = data.productions.filter(p=>p.status!=="Finalizado");
 
@@ -2657,13 +2631,12 @@ function PgStock({ data, setData, reload, tenantId }) {
   const [search,setSearch] = useState("");
   const all = [...data.rawMaterials.map(m=>({...m,tp:"Tecido"})),...data.trims.map(t=>({...t,tp:"Aviamento"}))];
   const filtered = all.filter(i=>i.desc.toLowerCase().includes(search.toLowerCase())||i.code.toLowerCase().includes(search.toLowerCase()));
-  const critical = filtered.filter(i=>i.stock<=i.min);
 
   const fld = k => v => setEd(p=>({...p,[k]:v}));
   const openEdit = item => setEd({...item});
   const saveEdit = async () => {
     const isRM = ed.tp==="Tecido";
-    const patch = { ...ed, stock:parseFloat(ed.stock)||0, min:parseFloat(ed.min)||0, avgCost:parseFloat(ed.avgCost)||0 };
+    const patch = { ...ed, avgCost:parseFloat(ed.avgCost)||0 };
     try {
       if(isRM){ const r=await sb.saveRM(patch,tenantId); setData(d=>({...d,rawMaterials:d.rawMaterials.map(m=>m.id===r.id?{...r,tp:"Tecido"}:m)})); }
       else { const r=await sb.saveTrim(patch,tenantId); setData(d=>({...d,trims:d.trims.map(t=>t.id===r.id?r:t)})); }
@@ -2674,30 +2647,17 @@ function PgStock({ data, setData, reload, tenantId }) {
 
   return (
     <div>
-      <SH title="Estoque" sub={all.length+" itens cadastrados"}/>
+      <SH title="Custos de materiais" sub={all.length+" itens · custo médio calculado pelas compras"}/>
       <div style={{marginBottom:16}}>
         <Inp placeholder="Buscar por nome ou código…" value={search} onChange={setSearch}/>
       </div>
-      {critical.length>0&&(
-        <div style={{marginBottom:16}}>
-          <Bnr type="warn">{critical.length} item(ns) abaixo do estoque mínimo</Bnr>
-          <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:6,marginTop:10}}>
-            {critical.map(item=>(
-              <div key={item.id+item.tp} onClick={()=>setSel(item)} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 12px",borderRadius:DS.r8,background:DS.warnSft,border:`1px solid ${DS.warnBd}`,cursor:"pointer"}}>
-                <div><div style={{fontSize:12,fontWeight:600}}>{item.desc}</div><div style={{fontSize:11,color:DS.warn}}>{item.stock}{item.unit} / mín {item.min}{item.unit}</div></div>
-                <Chip xs c={DS.warn} bg={DS.warnSft} bd={DS.warnBd}>{item.tp}</Chip>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
       <Card p={0}>
         <Tbl onRow={r=>setSel(r)} rows={filtered} cols={[
           {k:"tp",l:"Tipo",r:r=><Chip xs>{r.tp}</Chip>},
           {k:"code",l:"Código",r:r=><span style={{fontFamily:"monospace",fontSize:11,color:DS.i3}}>{r.code}</span>},
           {k:"desc",l:"Descrição",r:r=><span style={{fontWeight:500}}>{r.desc}</span>},
-          {k:"stock",l:"Estoque",r:r=>{const col=r.stock<=r.min?DS.err:r.stock<=r.min*1.5?DS.warn:DS.ok;return <div><span style={{fontWeight:700,color:col}}>{r.stock}{r.unit}</span><div style={{width:56,height:2,background:DS.surEl,borderRadius:1,marginTop:4}}><div style={{width:`${Math.min((r.stock/r.min)*50,100)}%`,height:"100%",background:col,borderRadius:1}}/></div></div>;}},
-          {k:"min",l:"Mínimo",r:r=><span style={{color:DS.i3,fontSize:12}}>{r.min}{r.unit}</span>},
+          {k:"avgCost",l:"Custo médio",r:r=><span style={{fontWeight:700,fontVariantNumeric:"tabular-nums"}}>{R(r.avgCost||0)}<span style={{fontSize:11,color:DS.i3,fontWeight:400}}>/{r.unit}</span></span>},
+          {k:"compras",l:"Compras",r:r=>{const n=purchaseHistory(data.purchases,r.id,r.tp==="Tecido"?"rm":"trim").length;return <span style={{fontSize:12,color:n?DS.i2:DS.i4}}>{n?n+" compra(s)":"sem compras"}</span>;}},
           {k:"avgCost",l:"Custo médio",r:r=><span style={{fontVariantNumeric:"tabular-nums",fontWeight:500}}>{R(r.avgCost)}/{r.unit}</span>},
           {k:"supplier",l:"Fornecedor",r:r=><span style={{fontSize:12,color:DS.i2}}>{r.supplier}</span>},
           {k:"_",l:"",r:r=>(
@@ -2726,7 +2686,6 @@ function PgStock({ data, setData, reload, tenantId }) {
             <Inp label="Telefone" value={ed.phone} onChange={fld("phone")}/>
           </div>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12}}>
-            <Inp label="Estoque" type="number" value={ed.stock} onChange={fld("stock")}/>
             <Inp label="Mínimo" type="number" value={ed.min} onChange={fld("min")}/>
             <Inp label="Custo médio" type="number" value={ed.avgCost} onChange={fld("avgCost")}/>
           </div>
@@ -2779,30 +2738,27 @@ function PgPurchases({ data, setData, reload, tenantId }) {
     const catLabel = form.type==="rm" ? "Tecidos" : "Aviamentos";
     try {
       // 1. Salvar compra
-      const purchData = {...form, qty:parseFloat(form.qty), price:parseFloat(form.price), total, parcelas:nParcelas};
+      const purchData = {...(ed?{id:ed.id}:{}), ...form, qty:parseFloat(form.qty), price:parseFloat(form.price), total, parcelas:nParcelas};
       const savedPurch = await sb.savePurch(purchData, tenantId);
-      // 2. Atualizar estoque (só nova compra)
-      if(isNew){
+      // 2. Recalcular o custo médio a partir de TODAS as compras deste item
+      const todasCompras=[...data.purchases.filter(x=>x.id!==savedPurch.id),savedPurch];
+      const novoCusto=avgFromPurchases(todasCompras,form.itemId,form.type);
+      if(novoCusto!=null){
         if(form.type==="rm"){
-          const m=data.rawMaterials.find(x=>x.id==form.itemId||x.id===form.itemId);
+          const m=data.rawMaterials.find(x=>String(x.id)===String(form.itemId));
           if(m){
-            const newHist=[...(m.hist||[]),{date:form.date,qty:parseFloat(form.qty),price:parseFloat(form.price)}];
-            const newAvg=weightedAvg(newHist);
-            let newColors=m.colors||[];
-            if(form.color&&Array.isArray(newColors)){
-              newColors=newColors.map(c=>c.name===form.color?{...c,stock:(c.stock||0)+parseFloat(form.qty)}:c);
-            }
-            const updRM=await sb.saveRM({...m,stock:(m.stock||0)+parseFloat(form.qty),avgCost:newAvg,hist:newHist,colors:newColors},tenantId);
+            const updRM=await sb.saveRM({...m,avgCost:novoCusto},tenantId);
             setData(d=>({...d,rawMaterials:d.rawMaterials.map(x=>x.id===updRM.id?updRM:x)}));
           }
         } else {
-          const t=data.trims.find(x=>x.id==form.itemId||x.id===form.itemId);
+          const t=data.trims.find(x=>String(x.id)===String(form.itemId));
           if(t){
-            const newHist=[...(t.hist||[]),{date:form.date,qty:parseFloat(form.qty),price:parseFloat(form.price)}];
-            const updTrim=await sb.saveTrim({...t,stock:(t.stock||0)+parseFloat(form.qty),avgCost:weightedAvg(newHist),hist:newHist},tenantId);
+            const updTrim=await sb.saveTrim({...t,avgCost:novoCusto},tenantId);
             setData(d=>({...d,trims:d.trims.map(x=>x.id===updTrim.id?updTrim:x)}));
           }
         }
+      }
+      if(isNew){
         // 3. Gerar contas a pagar
         if(form.pay!=="À Vista"){
           const payArr=[];
@@ -2821,7 +2777,28 @@ function PgPurchases({ data, setData, reload, tenantId }) {
   };
 
   // Cascade: delete purchase AND its generated payables
-  const delPurch = (id,e) => { e.stopPropagation(); confirmDelete(async()=>{try{await sb.deletePurch(id);await sb.deletePaysByPurchase(id);setData(d=>({...d,purchases:d.purchases.filter(p=>p.id!==id),payables:d.payables.filter(p=>p.purchaseId!==id)}));}catch(er){showToast("Erro: "+er.message,"err");}},{title:"Excluir compra",message:"A compra e as contas a pagar geradas por ela serão excluídas. Esta ação não pode ser desfeita."}); };
+  const delPurch = (id,e) => { e.stopPropagation();
+    const alvo=data.purchases.find(p=>p.id===id);
+    confirmDelete(async()=>{try{
+      await sb.deletePurch(id); await sb.deletePaysByPurchase(id);
+      const restantes=data.purchases.filter(p=>p.id!==id);
+      if(alvo?.itemId){
+        const novo=avgFromPurchases(restantes,alvo.itemId,alvo.type);
+        if(novo!=null){
+          if(alvo.type==="rm"){
+            const m=data.rawMaterials.find(x=>String(x.id)===String(alvo.itemId));
+            if(m){const u=await sb.saveRM({...m,avgCost:novo},tenantId);
+              setData(d=>({...d,rawMaterials:d.rawMaterials.map(x=>x.id===u.id?u:x)}));}
+          } else {
+            const t=data.trims.find(x=>String(x.id)===String(alvo.itemId));
+            if(t){const u=await sb.saveTrim({...t,avgCost:novo},tenantId);
+              setData(d=>({...d,trims:d.trims.map(x=>x.id===u.id?u:x)}));}
+          }
+        }
+      }
+      setData(d=>({...d,purchases:restantes,payables:d.payables.filter(p=>p.purchaseId!==id)}));
+      showToast("Compra excluída e custo médio recalculado.","ok");
+    }catch(er){showToast("Erro: "+er.message,"err");}},{title:"Excluir compra",message:"A compra e as contas a pagar geradas por ela serão excluídas. Esta ação não pode ser desfeita."}); };
 
   return (
     <div>
@@ -3363,21 +3340,19 @@ function PgFabrics({ data, setData, reload, tenantId }) {
   const [showF,setShowF] = useState(false);
   const [ed,setEd]       = useState(null);
   const [sel,setSel]     = useState(null);
-  const EF = {code:"",desc:"",unit:"m",supplier:"",phone:"",stock:"",min:"",avgCost:"",colors:[]};
+  const EF = {code:"",desc:"",unit:"m",supplier:"",phone:"",avgCost:"",colors:[]};
   const [form,setForm]   = useState(EF);
   const fld = k => v => setForm(p=>({...p,[k]:v}));
   // Colors
-  const addColor = () => setForm(p=>({...p,colors:[...(p.colors||[]),{name:"",stock:0}]}));
+  const addColor = () => setForm(p=>({...p,colors:[...(p.colors||[]),{name:""}]}));
   const remColor = i => setForm(p=>({...p,colors:p.colors.filter((_,j)=>j!==i)}));
   const setColorName = (i,v) => setForm(p=>({...p,colors:p.colors.map((c,j)=>j===i?{...c,name:v}:c)}));
-  const setColorStock = (i,v) => setForm(p=>({...p,colors:p.colors.map((c,j)=>j===i?{...c,stock:v}:c)}));
-  const colorsTotal = (form.colors||[]).reduce((s,c)=>s+(parseFloat(c.stock)||0),0);
   const hasColors = (form.colors||[]).length>0;
 
   const doSave = async () => {
-    const colors=(form.colors||[]).map(c=>({name:c.name,stock:parseFloat(c.stock)||0})).filter(c=>c.name);
-    const totalStock = colors.length>0 ? colors.reduce((s,c)=>s+c.stock,0) : parseFloat(form.stock)||0;
-    const rmData = {...form,colors,stock:totalStock,min:parseFloat(form.min)||0,avgCost:parseFloat(form.avgCost)||0,...(ed?{id:ed.id,hist:ed.hist||[]}:{hist:[{date:TODAY,qty:totalStock,price:parseFloat(form.avgCost)||0}]})};
+    const colors=(form.colors||[]).map(c=>({name:c.name})).filter(c=>c.name);
+    const rmData = {...form,colors,stock:0,min:0,avgCost:parseFloat(form.avgCost)||0,
+      ...(ed?{id:ed.id,hist:ed.hist||[]}:{hist:[]})};
     try{
       const saved=await sb.saveRM(rmData,tenantId);
       if(ed) setData(d=>({...d,rawMaterials:d.rawMaterials.map(m=>m.id===saved.id?saved:m)}));
@@ -3397,8 +3372,7 @@ function PgFabrics({ data, setData, reload, tenantId }) {
           {k:"code",l:"Código",r:r=><span style={{fontFamily:"monospace",fontSize:11,color:DS.i3}}>{r.code}</span>},
           {k:"desc",l:"Descrição",r:r=><span style={{fontWeight:500}}>{r.desc}</span>},
           {k:"colors",l:"Cores",r:r=>(r.colors&&r.colors.length>0)?<span style={{fontSize:12,color:DS.i2}}>{r.colors.length} cor(es)</span>:<span style={{fontSize:12,color:DS.i4}}>—</span>},
-          {k:"stock",l:"Estoque",r:r=>{const col=r.stock<=r.min?DS.err:r.stock<=r.min*1.5?DS.warn:DS.ok;return <span style={{fontWeight:700,color:col}}>{r.stock}{r.unit}</span>;}},
-          {k:"min",l:"Mínimo",r:r=><span style={{color:DS.i3,fontSize:12}}>{r.min}{r.unit}</span>},
+          {k:"compras",l:"Compras",r:r=>{const n=purchaseHistory(data.purchases,r.id,"rm").length;return <span style={{fontSize:12,color:n?DS.i2:DS.i4}}>{n?n+"x":"—"}</span>;}},
           {k:"avgCost",l:"Custo médio",r:r=><span style={{fontVariantNumeric:"tabular-nums",fontWeight:600}}>{R(r.avgCost)}/{r.unit}</span>},
           {k:"supplier",l:"Fornecedor",r:r=><span style={{fontSize:12,color:DS.i2}}>{r.supplier}</span>},
           {k:"_",l:"",r:r=>(
@@ -3435,14 +3409,12 @@ function PgFabrics({ data, setData, reload, tenantId }) {
                 {form.colors.map((c,i)=>(
                   <div key={i} style={{display:"flex",alignItems:"center",gap:8}}>
                     <input value={c.name} onChange={e=>setColorName(i,e.target.value)} placeholder="Nome da cor (ex: Preto)" style={{flex:1,height:38,padding:"0 12px",borderRadius:DS.r8,border:`1px solid ${DS.bd}`,fontSize:13,fontFamily:"inherit",outline:"none",background:DS.sur,color:DS.i1}}/>
-                    <input type="number" min="0" value={c.stock} onChange={e=>setColorStock(i,e.target.value)} placeholder="0" style={{width:90,height:38,padding:"0 10px",borderRadius:DS.r8,border:`1px solid ${DS.bd}`,fontSize:13,fontFamily:"inherit",outline:"none",textAlign:"center",background:DS.sur,color:DS.i1}}/>
                     <span style={{fontSize:12,color:DS.i3,minWidth:18}}>{form.unit}</span>
                     <IBt icon="✕" onClick={()=>remColor(i)} v="danger"/>
                   </div>
                 ))}
                 <div style={{display:"flex",justifyContent:"space-between",padding:"8px 12px",background:DS.surEl,borderRadius:DS.r8,fontSize:12}}>
                   <span style={{color:DS.i2}}>Estoque total (soma das cores)</span>
-                  <strong style={{fontVariantNumeric:"tabular-nums"}}>{colorsTotal}{form.unit}</strong>
                 </div>
               </div>
             ) : (
@@ -3453,8 +3425,6 @@ function PgFabrics({ data, setData, reload, tenantId }) {
           </div>
 
           <div style={{display:"grid",gridTemplateColumns:hasColors?"1fr 1fr":"1fr 1fr 1fr",gap:12}}>
-            {!hasColors&&<Inp label="Estoque atual" type="number" req value={form.stock} onChange={fld("stock")}/>}
-            <Inp label="Est. mínimo" type="number" req value={form.min} onChange={fld("min")}/>
             <Inp label="Custo médio" type="number" req value={form.avgCost} onChange={fld("avgCost")}/>
           </div>
           <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
@@ -3474,11 +3444,11 @@ function PgTrims({ data, setData, reload, tenantId }) {
   const [showF,setShowF] = useState(false);
   const [ed,setEd]       = useState(null);
   const [sel,setSel]     = useState(null);
-  const EF = {code:"",desc:"",unit:"un",supplier:"",phone:"",stock:"",min:"",avgCost:""};
+  const EF = {code:"",desc:"",unit:"un",supplier:"",phone:"",avgCost:""};
   const [form,setForm]   = useState(EF);
   const fld = k => v => setForm(p=>({...p,[k]:v}));
   const doSave = async () => {
-    const trimData={...form,stock:parseFloat(form.stock)||0,min:parseFloat(form.min)||0,avgCost:parseFloat(form.avgCost)||0,...(ed?{id:ed.id,hist:ed.hist||[]}:{hist:[{date:TODAY,qty:parseFloat(form.stock)||0,price:parseFloat(form.avgCost)||0}]})};
+    const trimData={...form,stock:0,min:0,avgCost:parseFloat(form.avgCost)||0,...(ed?{id:ed.id,hist:ed.hist||[]}:{hist:[]})};
     try{
       const saved=await sb.saveTrim(trimData,tenantId);
       if(ed) setData(d=>({...d,trims:d.trims.map(t=>t.id===saved.id?saved:t)}));
@@ -3497,8 +3467,7 @@ function PgTrims({ data, setData, reload, tenantId }) {
         <Tbl onRow={r=>setSel(r)} rows={data.trims} cols={[
           {k:"code",l:"Código",r:r=><span style={{fontFamily:"monospace",fontSize:11,color:DS.i3}}>{r.code}</span>},
           {k:"desc",l:"Descrição",r:r=><span style={{fontWeight:500}}>{r.desc}</span>},
-          {k:"stock",l:"Estoque",r:r=>{const col=r.stock<=r.min?DS.err:r.stock<=r.min*1.5?DS.warn:DS.ok;return <span style={{fontWeight:700,color:col}}>{r.stock}{r.unit}</span>;}},
-          {k:"min",l:"Mínimo",r:r=><span style={{color:DS.i3,fontSize:12}}>{r.min}{r.unit}</span>},
+          {k:"compras",l:"Compras",r:r=>{const n=purchaseHistory(data.purchases,r.id,"trim").length;return <span style={{fontSize:12,color:n?DS.i2:DS.i4}}>{n?n+"x":"—"}</span>;}},
           {k:"avgCost",l:"Custo médio",r:r=><span style={{fontVariantNumeric:"tabular-nums",fontWeight:600}}>{R(r.avgCost)}/{r.unit}</span>},
           {k:"supplier",l:"Fornecedor",r:r=><span style={{fontSize:12,color:DS.i2}}>{r.supplier}</span>},
           {k:"_",l:"",r:r=>(
@@ -3524,8 +3493,6 @@ function PgTrims({ data, setData, reload, tenantId }) {
             <Inp label="Telefone" value={form.phone} onChange={fld("phone")}/>
           </div>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12}}>
-            <Inp label="Estoque atual" type="number" req value={form.stock} onChange={fld("stock")}/>
-            <Inp label="Est. mínimo" type="number" req value={form.min} onChange={fld("min")}/>
             <Inp label="Custo médio" type="number" req value={form.avgCost} onChange={fld("avgCost")}/>
           </div>
           <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
@@ -3547,7 +3514,7 @@ function PgUsers({ data, setData, reload, tenantId, currentUser }) {
   const EF = {name:"",username:"",password:"",role:"production",active:true};
   const [form,setForm]   = useState(EF);
   const fld = k => v => setForm(p=>({...p,[k]:v}));
-  const roles = [{v:"admin",l:"Administrador"},{v:"financial",l:"Financeiro"},{v:"production",l:"Produção"},{v:"stock",l:"Estoque"}];
+  const roles = [{v:"admin",l:"Administrador"},{v:"financial",l:"Financeiro"},{v:"production",l:"Produção"},{v:"stock",l:"Materiais"}];
   const doSave = () => {
     if(!form.name||!form.username){ showToast("Preencha nome e usuário.","err"); return; }
     // handled by async doSave — ID comes from Supabase
@@ -3594,6 +3561,499 @@ function PgUsers({ data, setData, reload, tenantId, currentUser }) {
 // ═══════════════════════════════════════════════════════════════════════════════
 // NAV STRUCTURE
 // ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════
+// FATURAMENTO — marketplaces, metas e evolução mensal
+// ═══════════════════════════════════════════════════════════════════
+const MES_NOMES = ["Janeiro","Fevereiro","Março","Abril","Maio","Junho",
+                   "Julho","Agosto","Setembro","Outubro","Novembro","Dezembro"];
+const mesLabel = ym => { if(!ym) return "—"; const [y,m]=ym.split("-");
+  return MES_NOMES[parseInt(m)-1]+" "+y; };
+const mesCurto = ym => { if(!ym) return "—"; const [y,m]=ym.split("-");
+  return MES_NOMES[parseInt(m)-1].slice(0,3)+"/"+y.slice(-2); };
+
+const CANAIS_PADRAO = [
+  {name:"Mercado Livre", cor:"#FFE600", txt:"#0C0C0B"},
+  {name:"Shopee",        cor:"#EE4D2D", txt:"#fff"},
+  {name:"Shein",         cor:"#0C0C0B", txt:"#fff"},
+  {name:"TikTok Shop",   cor:"#25F4EE", txt:"#0C0C0B"},
+  {name:"Magalu",        cor:"#0086FF", txt:"#fff"},
+];
+const corCanal = n => CANAIS_PADRAO.find(c=>c.name===n) || {cor:"#767672",txt:"#fff"};
+const GASTOS_PADRAO = ["Ads Mercado Livre","Ads Shopee","Ads TikTok",
+                       "Afiliados Shopee","Afiliados TikTok","DAS"];
+
+const somaCanais  = r => (r.channels||[]).reduce((s,c)=>s+(Number(c.revenue)||0),0);
+const somaLucros  = r => (r.channels||[]).reduce((s,c)=>s+(Number(c.profit)||0),0);
+const somaGastos  = r => (r.expenses||[]).reduce((s,e)=>s+(Number(e.amount)||0),0);
+const liquido     = r => somaLucros(r)-somaGastos(r);
+
+/* variação percentual entre dois meses */
+const varPct = (atual,ant) => {
+  if(ant===0&&atual===0) return {v:0,tipo:"igual"};
+  if(ant===0) return {v:null,tipo:"novo"};
+  const v=((atual-ant)/Math.abs(ant))*100;
+  if(Math.abs(v)<0.5) return {v:0,tipo:"igual"};
+  return {v,tipo:v>0?"subiu":"caiu"};
+};
+
+function Variacao({dado,inverso,titulo}){
+  if(!dado) return null;
+  const {v,tipo}=dado;
+  if(tipo==="novo")
+    return <span title={titulo} style={{display:"inline-flex",alignItems:"center",gap:3,padding:"2px 8px",
+      borderRadius:20,background:DS.blueSft,border:`1px solid ${DS.blueBd}`,color:DS.blue,
+      fontSize:11,fontWeight:700}}>novo</span>;
+  if(tipo==="igual")
+    return <span title={titulo} style={{display:"inline-flex",alignItems:"center",gap:3,padding:"2px 8px",
+      borderRadius:20,background:DS.surEl,color:DS.i3,fontSize:11,fontWeight:700}}>0%</span>;
+  const bom = inverso ? tipo==="caiu" : tipo==="subiu";
+  const cor = bom?DS.ok:DS.err;
+  const bg  = bom?DS.okSft:DS.errSft;
+  const bd  = bom?DS.okBd:DS.errBd;
+  return (
+    <span title={titulo} style={{display:"inline-flex",alignItems:"center",gap:3,padding:"2px 8px",
+      borderRadius:20,background:bg,border:`1px solid ${bd}`,color:cor,fontSize:11,fontWeight:700,
+      cursor:titulo?"help":"default"}}>
+      {tipo==="subiu"?"▲":"▼"}{Math.abs(v).toFixed(Math.abs(v)<10?1:0).replace(".",",")}%
+    </span>
+  );
+}
+
+function PgFaturamento({ data, setData, tenantId }){
+  const { isSmall } = useViewport();
+  const meses = useMemo(()=>[...(data.revenue||[])].sort((a,b)=>b.month.localeCompare(a.month)),[data.revenue]);
+  const [selMes,setSelMes] = useState(null);
+  const [showF,setShowF]   = useState(false);
+  const [ed,setEd]         = useState(null);
+  const [salvando,setSalvando] = useState(false);
+
+  const EF = () => ({
+    month: TODAY.slice(0,7), goal:"",
+    channels: CANAIS_PADRAO.slice(0,4).map(c=>({name:c.name,revenue:"",profit:""})),
+    expenses: GASTOS_PADRAO.map(n=>({name:n,amount:""})),
+    notes:"",
+  });
+  const [form,setForm] = useState(EF);
+
+  const atual = selMes ? meses.find(m=>m.month===selMes) : meses[0];
+  const idx = atual ? meses.findIndex(m=>m.month===atual.month) : -1;
+  const anterior = idx>=0 && idx<meses.length-1 ? meses[idx+1] : null;
+
+  const fat = atual?somaCanais(atual):0;
+  const luc = atual?somaLucros(atual):0;
+  const gas = atual?somaGastos(atual):0;
+  const liq = atual?liquido(atual):0;
+  const meta = Number(atual?.goal)||0;
+  const margem = fat>0 ? (liq/fat)*100 : 0;
+
+  const vFat = anterior?varPct(fat,somaCanais(anterior)):null;
+  const vLuc = anterior?varPct(luc,somaLucros(anterior)):null;
+  const vGas = anterior?varPct(gas,somaGastos(anterior)):null;
+  const vLiq = anterior?varPct(liq,liquido(anterior)):null;
+  const tipAnt = anterior?`Mês anterior: ${mesCurto(anterior.month)}`:null;
+
+  const abrirNovo = () => { setEd(null); setForm(EF()); setShowF(true); };
+  const abrirEdit = m => {
+    setEd(m);
+    setForm({
+      month:m.month, goal:m.goal?String(m.goal):"",
+      channels:(m.channels||[]).map(c=>({name:c.name,revenue:String(c.revenue??""),profit:String(c.profit??"")})),
+      expenses:(m.expenses||[]).map(e=>({name:e.name,amount:String(e.amount??"")})),
+      notes:m.notes||"",
+    });
+    setShowF(true);
+  };
+
+  const num = v => parseFloat(String(v).replace(/\./g,"").replace(",","."))||0;
+
+  const salvar = async () => {
+    if(!form.month){ showToast("Escolha o mês.","err"); return; }
+    if(!ed && meses.some(m=>m.month===form.month)){
+      showToast("Este mês já existe. Abra o mês e use Editar.","err"); return;
+    }
+    setSalvando(true);
+    try{
+      const payload = {
+        ...(ed?{id:ed.id}:{}),
+        month:form.month, goal:num(form.goal),
+        channels:form.channels.filter(c=>c.name&&(c.revenue!==""||c.profit!==""))
+          .map(c=>({name:c.name,revenue:num(c.revenue),profit:num(c.profit)})),
+        expenses:form.expenses.filter(e=>e.name&&e.amount!=="")
+          .map(e=>({name:e.name,amount:num(e.amount)})),
+        notes:form.notes,
+      };
+      const saved = await sb.saveRevenue(payload,tenantId);
+      setData(d=>({...d,revenue: ed
+        ? (d.revenue||[]).map(m=>m.id===saved.id?saved:m)
+        : [...(d.revenue||[]),saved]}));
+      setSelMes(saved.month); setShowF(false); setEd(null);
+      showToast(ed?"Mês atualizado.":"Mês cadastrado.","ok");
+    }catch(e){ showToast("Erro: "+e.message,"err"); }
+    finally{ setSalvando(false); }
+  };
+
+  const excluir = m => confirmDelete(async()=>{
+    try{ await sb.deleteRevenue(m.id);
+      setData(d=>({...d,revenue:(d.revenue||[]).filter(x=>x.id!==m.id)}));
+      setSelMes(null); showToast("Mês excluído.","ok");
+    }catch(e){ showToast("Erro: "+e.message,"err"); }
+  },{title:"Excluir "+mesLabel(m.month),message:"Todos os dados deste mês serão removidos."});
+
+  const setCanal = (i,k,v) => setForm(p=>({...p,channels:p.channels.map((c,j)=>j===i?{...c,[k]:v}:c)}));
+  const setGasto = (i,k,v) => setForm(p=>({...p,expenses:p.expenses.map((e,j)=>j===i?{...e,[k]:v}:e)}));
+
+  const prevFat = form.channels.reduce((s,c)=>s+num(c.revenue),0);
+  const prevLuc = form.channels.reduce((s,c)=>s+num(c.profit),0);
+  const prevGas = form.expenses.reduce((s,e)=>s+num(e.amount),0);
+
+  /* série dos últimos 12 meses, do mais antigo ao mais recente */
+  const serie = [...meses].reverse().slice(-12);
+  const maxSerie = Math.max(...serie.map(m=>somaCanais(m)),1);
+
+  const Kpi = ({label,valor,variacao,inverso,destaque,sub}) => (
+    <Card p={16}>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,marginBottom:10}}>
+        <Lbl ch={label}/>
+        <Variacao dado={variacao} inverso={inverso} titulo={tipAnt}/>
+      </div>
+      <div style={{fontSize:destaque?26:22,fontWeight:780,letterSpacing:"-.6px",
+        color:destaque?(liq>=0?DS.ok:DS.err):DS.i1,fontVariantNumeric:"tabular-nums",lineHeight:1.1}}>
+        {valor}
+      </div>
+      {sub&&<div style={{fontSize:12,color:DS.i3,marginTop:4}}>{sub}</div>}
+    </Card>
+  );
+
+  return (
+    <div>
+      <SH title="Faturamento" sub={atual?mesLabel(atual.month):"Nenhum mês cadastrado"}
+        action={<Btn onClick={abrirNovo}>+ Novo mês</Btn>}/>
+
+      {meses.length===0 ? (
+        <Card p={0}>
+          <div style={{textAlign:"center",padding:"64px 24px"}}>
+            <div style={{fontSize:16,fontWeight:700,color:DS.i1,marginBottom:8}}>Comece pelo primeiro mês</div>
+            <div style={{fontSize:13.5,color:DS.i3,maxWidth:400,margin:"0 auto 20px",lineHeight:1.6}}>
+              Cadastre o faturamento e o lucro de cada marketplace, mais os gastos com anúncios e impostos.
+              A partir do segundo mês o sistema mostra a variação automaticamente.
+            </div>
+            <Btn onClick={abrirNovo}>Cadastrar mês</Btn>
+          </div>
+        </Card>
+      ) : (
+        <>
+          {/* seletor de mês */}
+          <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center",marginBottom:22,
+            paddingBottom:16,borderBottom:`1px solid ${DS.bd}`}}>
+            {meses.slice(0,14).map(m=>{
+              const on = atual?.month===m.month;
+              return (
+                <button key={m.id} onClick={()=>setSelMes(m.month)}
+                  style={{height:34,padding:"0 13px",borderRadius:DS.r8,cursor:"pointer",fontFamily:"inherit",
+                    fontSize:13,fontWeight:on?600:500,whiteSpace:"nowrap",
+                    border:`1px solid ${on?DS.ink:DS.bd}`,background:on?DS.ink:"transparent",
+                    color:on?"#fff":DS.i2,transition:`all ${DS.fast}`}}>
+                  {mesCurto(m.month)}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* KPIs */}
+          <div style={{display:"grid",gridTemplateColumns:isSmall?"1fr 1fr":"repeat(4,1fr)",
+            gap:10,marginBottom:10}}>
+            <Kpi label="Faturamento" valor={R(fat)} variacao={vFat}
+              sub={anterior?mesCurto(anterior.month)+": "+R(somaCanais(anterior)):null}/>
+            <Kpi label="Lucro bruto" valor={R(luc)} variacao={vLuc}
+              sub={fat>0?((luc/fat)*100).toFixed(1).replace(".",",")+"% do faturamento":null}/>
+            <Kpi label="Gastos" valor={R(gas)} variacao={vGas} inverso
+              sub={anterior?mesCurto(anterior.month)+": "+R(somaGastos(anterior)):null}/>
+            <Kpi label="Lucro líquido" valor={R(liq)} variacao={vLiq} destaque
+              sub={"margem "+margem.toFixed(1).replace(".",",")+"%"}/>
+          </div>
+
+          {/* meta */}
+          {meta>0&&(
+            <Card p={16} style={{marginBottom:26}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",
+                gap:12,marginBottom:10,flexWrap:"wrap"}}>
+                <Lbl ch="Meta do mês"/>
+                <div style={{fontSize:13,color:DS.i2,fontVariantNumeric:"tabular-nums"}}>
+                  <strong style={{color:fat>=meta?DS.ok:DS.i1,fontSize:15}}>{R(fat)}</strong>
+                  <span style={{color:DS.i3}}> de {R(meta)}</span>
+                  <strong style={{marginLeft:8,color:fat>=meta?DS.ok:DS.warn}}>
+                    {((fat/meta)*100).toFixed(0)}%
+                  </strong>
+                </div>
+              </div>
+              <div style={{height:9,borderRadius:5,background:DS.surEl,overflow:"hidden"}}>
+                <div style={{width:Math.min(100,(fat/meta)*100)+"%",height:"100%",
+                  background:fat>=meta?DS.ok:DS.ink,transition:`width ${DS.slow}`}}/>
+              </div>
+              {fat<meta&&<div style={{fontSize:12,color:DS.i3,marginTop:8}}>
+                Faltam {R(meta-fat)} para bater a meta
+              </div>}
+            </Card>
+          )}
+
+          {/* canais */}
+          <div style={{display:"grid",gridTemplateColumns:isSmall?"1fr":"1fr 1fr",gap:24,marginBottom:26}}>
+            <Card p={0}>
+              <div style={{padding:"14px 18px",borderBottom:`1px solid ${DS.bd}`,
+                display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <div style={{fontSize:14,fontWeight:700}}>Por marketplace</div>
+                <div style={{fontSize:12,color:DS.i3}}>{(atual?.channels||[]).length} canais</div>
+              </div>
+              {(atual?.channels||[]).length===0
+                ? <div style={{padding:"28px 18px",textAlign:"center",fontSize:13,color:DS.i3}}>Nenhum canal lançado</div>
+                : <div>
+                    {[...(atual.channels||[])].sort((a,b)=>(b.revenue||0)-(a.revenue||0)).map((c,i,arr)=>{
+                      const antC=(anterior?.channels||[]).find(x=>x.name===c.name);
+                      const vc=antC?varPct(Number(c.revenue)||0,Number(antC.revenue)||0):null;
+                      const share=fat>0?((Number(c.revenue)||0)/fat)*100:0;
+                      const cc=corCanal(c.name);
+                      return (
+                        <div key={c.name} style={{padding:"13px 18px",
+                          borderBottom:i<arr.length-1?`1px solid ${DS.bd}`:"none"}}>
+                          <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:8}}>
+                            <span style={{width:10,height:10,borderRadius:3,background:cc.cor,
+                              border:`1px solid ${DS.bd}`,flexShrink:0}}/>
+                            <span style={{flex:1,fontSize:13.5,fontWeight:600,color:DS.i1}}>{c.name}</span>
+                            <Variacao dado={vc} titulo={tipAnt}/>
+                            <span style={{fontSize:14,fontWeight:700,fontVariantNumeric:"tabular-nums",
+                              minWidth:96,textAlign:"right"}}>{R(c.revenue)}</span>
+                          </div>
+                          <div style={{display:"flex",alignItems:"center",gap:10}}>
+                            <div style={{flex:1,height:5,borderRadius:3,background:DS.surEl,overflow:"hidden"}}>
+                              <div style={{width:share+"%",height:"100%",background:cc.cor,
+                                transition:`width ${DS.slow}`}}/>
+                            </div>
+                            <span style={{fontSize:11,color:DS.i3,fontVariantNumeric:"tabular-nums",minWidth:38,
+                              textAlign:"right"}}>{share.toFixed(0)}%</span>
+                            {Number(c.profit)>0&&<span style={{fontSize:11,color:DS.ok,fontWeight:600,
+                              fontVariantNumeric:"tabular-nums"}}>lucro {R(c.profit)}</span>}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>}
+            </Card>
+
+            <Card p={0}>
+              <div style={{padding:"14px 18px",borderBottom:`1px solid ${DS.bd}`,
+                display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <div style={{fontSize:14,fontWeight:700}}>Gastos do mês</div>
+                <div style={{fontSize:14,fontWeight:700,color:DS.err,
+                  fontVariantNumeric:"tabular-nums"}}>{R(gas)}</div>
+              </div>
+              {(atual?.expenses||[]).length===0
+                ? <div style={{padding:"28px 18px",textAlign:"center",fontSize:13,color:DS.i3}}>Nenhum gasto lançado</div>
+                : <div>
+                    {[...(atual.expenses||[])].sort((a,b)=>(b.amount||0)-(a.amount||0)).map((e,i,arr)=>{
+                      const antE=(anterior?.expenses||[]).find(x=>x.name===e.name);
+                      const ve=antE?varPct(Number(e.amount)||0,Number(antE.amount)||0):null;
+                      return (
+                        <div key={e.name} style={{display:"flex",alignItems:"center",gap:10,
+                          padding:"12px 18px",borderBottom:i<arr.length-1?`1px solid ${DS.bd}`:"none"}}>
+                          <span style={{flex:1,fontSize:13,color:DS.i2}}>{e.name}</span>
+                          <Variacao dado={ve} inverso titulo={tipAnt}/>
+                          <span style={{fontSize:13.5,fontWeight:600,fontVariantNumeric:"tabular-nums",
+                            minWidth:88,textAlign:"right"}}>{R(e.amount)}</span>
+                        </div>
+                      );
+                    })}
+                  </div>}
+            </Card>
+          </div>
+
+          {/* evolução */}
+          {serie.length>1&&(
+            <Card p={0} style={{marginBottom:26}}>
+              <div style={{padding:"14px 18px",borderBottom:`1px solid ${DS.bd}`,fontSize:14,fontWeight:700}}>
+                Evolução do faturamento
+              </div>
+              <div style={{padding:"22px 18px",display:"flex",alignItems:"flex-end",gap:isSmall?5:9,
+                height:190,overflowX:"auto"}}>
+                {serie.map(m=>{
+                  const v=somaCanais(m);
+                  const h=Math.max(3,(v/maxSerie)*130);
+                  const on=atual?.month===m.month;
+                  const l=liquido(m);
+                  const hl=v>0?Math.max(0,(l/maxSerie)*130):0;
+                  return (
+                    <button key={m.id} onClick={()=>setSelMes(m.month)}
+                      title={mesLabel(m.month)+" · "+R(v)+" · líquido "+R(l)}
+                      style={{flex:1,minWidth:isSmall?30:38,display:"flex",flexDirection:"column",
+                        alignItems:"center",gap:6,background:"none",border:"none",cursor:"pointer",padding:0}}>
+                      <span style={{fontSize:10,color:on?DS.i1:DS.i3,fontWeight:on?700:500,
+                        fontVariantNumeric:"tabular-nums",whiteSpace:"nowrap"}}>
+                        {v>=1000?(v/1000).toFixed(0)+"k":v.toFixed(0)}
+                      </span>
+                      <span style={{width:"100%",height:h,borderRadius:"5px 5px 0 0",position:"relative",
+                        background:on?DS.ink:DS.bdM,transition:`background ${DS.fast}`}}>
+                        {hl>0&&<span style={{position:"absolute",bottom:0,left:0,right:0,height:Math.min(h,hl),
+                          background:on?DS.ok:DS.okBd,borderRadius:hl>=h?"5px 5px 0 0":0}}/>}
+                      </span>
+                      <span style={{fontSize:10,color:on?DS.i1:DS.i3,fontWeight:on?700:500,
+                        whiteSpace:"nowrap"}}>{mesCurto(m.month)}</span>
+                    </button>
+                  );
+                })}
+              </div>
+              <div style={{padding:"0 18px 16px",display:"flex",gap:16,fontSize:11,color:DS.i3}}>
+                <span style={{display:"flex",alignItems:"center",gap:5}}>
+                  <span style={{width:9,height:9,borderRadius:3,background:DS.ink}}/>Faturamento</span>
+                <span style={{display:"flex",alignItems:"center",gap:5}}>
+                  <span style={{width:9,height:9,borderRadius:3,background:DS.ok}}/>Lucro líquido</span>
+              </div>
+            </Card>
+          )}
+
+          {atual?.notes&&(
+            <Card p={16} style={{marginBottom:20}}>
+              <Lbl ch="Observações" style={{marginBottom:6}}/>
+              <div style={{fontSize:13.5,color:DS.i2,lineHeight:1.6,whiteSpace:"pre-wrap"}}>{atual.notes}</div>
+            </Card>
+          )}
+
+          <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+            <Btn v="secondary" onClick={()=>abrirEdit(atual)}>Editar {mesCurto(atual.month)}</Btn>
+            <Btn v="danger" onClick={()=>excluir(atual)}>Excluir mês</Btn>
+          </div>
+        </>
+      )}
+
+      {/* FORMULÁRIO */}
+      <Modal open={showF} onClose={()=>{setShowF(false);setEd(null);}}
+        title={ed?"Editar "+mesLabel(ed.month):"Novo mês"} width={680}>
+        <div style={{display:"flex",flexDirection:"column",gap:22}}>
+          <div style={{display:"grid",gridTemplateColumns:isSmall?"1fr":"1fr 1fr",gap:12}}>
+            <Inp label="Mês" type="month" value={form.month}
+              onChange={v=>setForm(p=>({...p,month:v}))} req/>
+            <Inp label="Meta de faturamento (R$)" value={form.goal}
+              onChange={v=>setForm(p=>({...p,goal:v}))} placeholder="Ex: 58000"/>
+          </div>
+
+          <div>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+              <Lbl ch="Faturamento por marketplace"/>
+              <Btn sz="sm" v="secondary"
+                onClick={()=>setForm(p=>({...p,channels:[...p.channels,{name:"",revenue:"",profit:""}]}))}>
+                + Canal
+              </Btn>
+            </div>
+            <div style={{background:DS.surEl,borderRadius:DS.r10,padding:12}}>
+              <div style={{display:"grid",gridTemplateColumns:isSmall?"1fr":"1.3fr 1fr 1fr 40px",
+                gap:8,marginBottom:8,fontSize:10.5,color:DS.i3,fontWeight:600,
+                textTransform:"uppercase",letterSpacing:".05em"}}>
+                <span>Canal</span><span>Faturamento</span><span>Lucro do canal</span><span/>
+              </div>
+              {form.channels.map((c,i)=>(
+                <div key={i} style={{display:"grid",
+                  gridTemplateColumns:isSmall?"1fr":"1.3fr 1fr 1fr 40px",gap:8,marginBottom:8,
+                  alignItems:"center"}}>
+                  <input value={c.name} onChange={e=>setCanal(i,"name",e.target.value)}
+                    placeholder="Nome do canal" list="canais-sugestao"
+                    style={{height:40,borderRadius:DS.r8,border:`1px solid ${DS.bd}`,padding:"0 11px",
+                      fontSize:13,fontFamily:"inherit",background:DS.sur,color:DS.i1}}/>
+                  <input value={c.revenue} onChange={e=>setCanal(i,"revenue",e.target.value)}
+                    placeholder="0,00" inputMode="decimal"
+                    style={{height:40,borderRadius:DS.r8,border:`1px solid ${DS.bd}`,padding:"0 11px",
+                      fontSize:13,fontFamily:"inherit",background:DS.sur,color:DS.i1,
+                      fontVariantNumeric:"tabular-nums"}}/>
+                  <input value={c.profit} onChange={e=>setCanal(i,"profit",e.target.value)}
+                    placeholder="opcional" inputMode="decimal"
+                    style={{height:40,borderRadius:DS.r8,border:`1px solid ${DS.bd}`,padding:"0 11px",
+                      fontSize:13,fontFamily:"inherit",background:DS.sur,color:DS.i1,
+                      fontVariantNumeric:"tabular-nums"}}/>
+                  <button onClick={()=>setForm(p=>({...p,channels:p.channels.filter((_,j)=>j!==i)}))}
+                    aria-label="Remover canal"
+                    style={{height:40,width:40,borderRadius:DS.r8,border:"none",background:"transparent",
+                      color:DS.err,cursor:"pointer",fontSize:15}}>✕</button>
+                </div>
+              ))}
+              <datalist id="canais-sugestao">
+                {CANAIS_PADRAO.map(c=><option key={c.name} value={c.name}/>)}
+              </datalist>
+              <div style={{display:"flex",justifyContent:"space-between",paddingTop:10,
+                borderTop:`1px solid ${DS.bd}`,fontSize:13}}>
+                <span style={{color:DS.i2}}>Total do mês</span>
+                <span style={{fontWeight:700,fontVariantNumeric:"tabular-nums"}}>
+                  {R(prevFat)}{prevLuc>0?" · lucro "+R(prevLuc):""}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+              <Lbl ch="Gastos do mês"/>
+              <Btn sz="sm" v="secondary"
+                onClick={()=>setForm(p=>({...p,expenses:[...p.expenses,{name:"",amount:""}]}))}>
+                + Gasto
+              </Btn>
+            </div>
+            <div style={{background:DS.surEl,borderRadius:DS.r10,padding:12}}>
+              {form.expenses.map((e,i)=>(
+                <div key={i} style={{display:"grid",gridTemplateColumns:"1.4fr 1fr 40px",gap:8,
+                  marginBottom:8,alignItems:"center"}}>
+                  <input value={e.name} onChange={ev=>setGasto(i,"name",ev.target.value)}
+                    placeholder="Descrição" list="gastos-sugestao"
+                    style={{height:40,borderRadius:DS.r8,border:`1px solid ${DS.bd}`,padding:"0 11px",
+                      fontSize:13,fontFamily:"inherit",background:DS.sur,color:DS.i1}}/>
+                  <input value={e.amount} onChange={ev=>setGasto(i,"amount",ev.target.value)}
+                    placeholder="0,00" inputMode="decimal"
+                    style={{height:40,borderRadius:DS.r8,border:`1px solid ${DS.bd}`,padding:"0 11px",
+                      fontSize:13,fontFamily:"inherit",background:DS.sur,color:DS.i1,
+                      fontVariantNumeric:"tabular-nums"}}/>
+                  <button onClick={()=>setForm(p=>({...p,expenses:p.expenses.filter((_,j)=>j!==i)}))}
+                    aria-label="Remover gasto"
+                    style={{height:40,width:40,borderRadius:DS.r8,border:"none",background:"transparent",
+                      color:DS.err,cursor:"pointer",fontSize:15}}>✕</button>
+                </div>
+              ))}
+              <datalist id="gastos-sugestao">
+                {GASTOS_PADRAO.map(n=><option key={n} value={n}/>)}
+              </datalist>
+              <div style={{display:"flex",justifyContent:"space-between",paddingTop:10,
+                borderTop:`1px solid ${DS.bd}`,fontSize:13}}>
+                <span style={{color:DS.i2}}>Total de gastos</span>
+                <span style={{fontWeight:700,color:DS.err,fontVariantNumeric:"tabular-nums"}}>{R(prevGas)}</span>
+              </div>
+            </div>
+          </div>
+
+          {/* prévia */}
+          <div style={{background:DS.ink,borderRadius:DS.r12,padding:"16px 18px",color:"#fff"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,flexWrap:"wrap"}}>
+              <div>
+                <div style={{fontSize:11,color:"rgba(255,255,255,.6)",textTransform:"uppercase",
+                  letterSpacing:".06em",fontWeight:600}}>Lucro líquido do mês</div>
+                <div style={{fontSize:12,color:"rgba(255,255,255,.55)",marginTop:3}}>
+                  {R(prevLuc)} de lucro − {R(prevGas)} de gastos
+                </div>
+              </div>
+              <div style={{fontSize:26,fontWeight:800,letterSpacing:"-.6px",
+                fontVariantNumeric:"tabular-nums",
+                color:(prevLuc-prevGas)>=0?"#4ADE80":"#FCA5A5"}}>
+                {R(prevLuc-prevGas)}
+              </div>
+            </div>
+          </div>
+
+          <Inp label="Observações" value={form.notes}
+            onChange={v=>setForm(p=>({...p,notes:v}))} placeholder="Opcional"/>
+
+          <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
+            <Btn v="secondary" onClick={()=>{setShowF(false);setEd(null);}}>Cancelar</Btn>
+            <Btn onClick={salvar} disabled={salvando}>{salvando?"Salvando…":(ed?"Salvar alterações":"Cadastrar mês")}</Btn>
+          </div>
+        </div>
+      </Modal>
+    </div>
+  );
+}
+
 const buildNav = (role) => {
   const allowed = ROLE_PAGES[role] || ROLE_PAGES.production;
   const all = [
@@ -3602,11 +4062,12 @@ const buildNav = (role) => {
     { id:"productions", l:"Produção",       group:null, ic:"M2.5 12.5h2V7h-2zM6 12.5h2V3.5H6zM9.5 12.5h2v-6h-2z" },
     { id:"__cadastro",  l:"Cadastro",       group:null, isGroup:true, ic:"M2.5 4.5h11M2.5 8h11M2.5 11.5h11", children:[
       { id:"products",  l:"Produtos",            ic:"M3 4.5L8 2l5 2.5v5L8 12 3 9.5zM3 4.5L8 7m0 5V7m5-2.5L8 7" },
-      { id:"stock",     l:"Estoque",             ic:"M2 5l6-3 6 3v6l-6 3-6-3zM2 5l6 3 6-3M8 8v6" },
+      { id:"stock",     l:"Custos de materiais", ic:"M8 2v12M11 4.5H6.75a1.75 1.75 0 100 3.5h2.5a1.75 1.75 0 010 3.5H5" },
       { id:"fabrics",   l:"Tecidos",             ic:"M2.5 3.5h9v2l-2 1.5 2 1.5v2.5h-9V8l2-1.5L2.5 5zM4.5 3.5v2M4.5 8v2.5" },
       { id:"trims",     l:"Aviamentos & Insumos",ic:"M5 5.5a2.5 2.5 0 105 0 2.5 2.5 0 00-5 0zM7.5 8v4.5M5.5 10.5h4" },
       { id:"users",     l:"Usuários", adminOnly:true, ic:"M5.5 6a2 2 0 100-4 2 2 0 000 4zM2 12.5c0-2 1.5-3.5 3.5-3.5S9 10.5 9 12.5M10.5 6.5a1.5 1.5 0 100-3M13.5 12.5c0-1.5-1-2.7-2.5-3.1" },
     ]},
+    { id:"revenue",     l:"Faturamento",   group:null, ic:"M2 12l3.5-4.5 3 3L13 4.5M13 4.5H9.5M13 4.5V8" },
     { id:"financial",   l:"Financeiro",    group:null, ic:"M8 2v12M11 4.5H6.75a1.75 1.75 0 100 3.5h2.5a1.75 1.75 0 010 3.5H5" },
     { id:"agenda",      l:"Agenda",         group:null, ic:"M3 3.5h10v10H3zM3 6.5h10M5.5 1.5v3M10.5 1.5v3" },
     { id:"outsourced",  l:"Terceirizados",  group:null, ic:"M5.5 7a2 2 0 100-4 2 2 0 000 4zM2 13c0-2 1.5-3.5 3.5-3.5S9 11 9 13M11 7.5a1.5 1.5 0 100-3M14 13c0-1.5-1-2.8-2.5-3.2" },
@@ -3708,6 +4169,7 @@ export default function App() {
     dashboard:    <PgDash        data={data} goTo={goTo} currentUser={currentUser}/>,
     productions:  <PgProductions data={data} setData={setData} reload={reload} tenantId={tenantId} fInit={filter}/>,
     "cut-order":  <PgCutOrder   data={data} setData={setData} reload={reload} tenantId={tenantId}/>,
+    revenue:      <PgFaturamento data={data} setData={setData} tenantId={tenantId}/>,
     financial:    <PgFinancial   data={data} setData={setData} reload={reload} tenantId={tenantId} fInit={filter}/>,
     agenda:       <PgAgenda      data={data} setData={setData} reload={reload} tenantId={tenantId}/>,
     stock:        <PgStock       data={data} setData={setData} reload={reload} tenantId={tenantId}/>,
@@ -3840,7 +4302,7 @@ export default function App() {
               <div style={{position:"absolute",bottom:0,left:0,right:0,background:DS.sur,borderRadius:"20px 20px 0 0",padding:"24px 16px calc(28px + env(safe-area-inset-bottom,0px))",animation:`cf-slideUp ${DS.base} both`}}>
                 <div style={{width:36,height:4,borderRadius:2,background:DS.bdM,margin:"0 auto 20px"}}/>
                 <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10}}>
-                  {[{id:"products",l:"Produtos"},{id:"stock",l:"Estoque"},{id:"fabrics",l:"Tecidos"},{id:"trims",l:"Aviamentos"},{id:"outsourced",l:"Terceirizados"},{id:"purchases",l:"Compras"},{id:"users",l:"Usuários"}].filter(it=>(ROLE_PAGES[currentUser.role]||[]).includes(it.id)).map(item=>{
+                  {[{id:"products",l:"Produtos"},{id:"stock",l:"Custos"},{id:"fabrics",l:"Tecidos"},{id:"trims",l:"Aviamentos"},{id:"outsourced",l:"Terceirizados"},{id:"purchases",l:"Compras"},{id:"users",l:"Usuários"}].filter(it=>(ROLE_PAGES[currentUser.role]||[]).includes(it.id)).map(item=>{
                     const active=page===item.id;
                     return (
                       <button key={item.id} onClick={()=>{goTo(item.id);setMMenu(false);}} style={{display:"flex",alignItems:"center",justifyContent:"center",padding:"16px 8px",borderRadius:DS.r12,border:"none",background:active?DS.ink:DS.surEl,cursor:"pointer",transition:`all ${DS.fast}`}}>
