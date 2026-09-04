@@ -5,7 +5,11 @@ import { createClient } from "@supabase/supabase-js";
 // ═══════════════════════════════════════════════════════════════════════════════
 // DESIGN SYSTEM
 // ═══════════════════════════════════════════════════════════════════════════════
+const FONT = "-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text', 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif";
+const FONT_NUM = "'SF Mono', ui-monospace, SFMono-Regular, Menlo, monospace";
+
 const DS = {
+  font:FONT, fontNum:FONT_NUM,
   bg:"#F6F6F4", canvas:"#FAFAF8", sur:"#FFFFFF", surEl:"#F3F3F1", surHov:"#EBEBEA",
   bd:"rgba(0,0,0,0.06)", bdM:"rgba(0,0,0,0.10)", bdS:"rgba(0,0,0,0.18)",
   i1:"#0C0C0B", i2:"#3D3D3B", i3:"#767672", i4:"#B0B0AC",
@@ -34,7 +38,13 @@ const GLOBAL_CSS = `
 @keyframes cf-rise { from { opacity:0; transform:translateY(8px) } to { opacity:1; transform:translateY(0) } }
 @keyframes cf-scale { from { opacity:0; transform:scale(0.97) } to { opacity:1; transform:scale(1) } }
 @keyframes cf-slideUp { from { opacity:0; transform:translateY(16px) } to { opacity:1; transform:translateY(0) } }
-* { box-sizing:border-box; -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility; }
+* { box-sizing:border-box; -webkit-font-smoothing:antialiased; -moz-osx-font-smoothing:grayscale; }
+html, body { margin:0; padding:0; font-family:${FONT}; font-synthesis:none;
+  text-rendering:optimizeLegibility; letter-spacing:-0.011em; }
+body { font-size:14px; line-height:1.5; }
+h1,h2,h3 { letter-spacing:-0.022em; font-weight:650; }
+input, select, textarea, button { font-family:inherit; letter-spacing:inherit; }
+.tnum, [style*="tabular-nums"] { font-feature-settings:"tnum","cv01"; }
 html, body { margin:0; padding:0; max-width:100%; overflow-x:hidden; }
 *::-webkit-scrollbar { width:10px; height:10px; }
 *::-webkit-scrollbar-thumb { background:rgba(0,0,0,0.12); border-radius:8px; border:2px solid transparent; background-clip:padding-box; }
@@ -298,6 +308,19 @@ const isWK  = d => d && d >= TODAY && d <= addD(TODAY,7);
 const isMO  = d => d && d >= TODAY && d.slice(0,7) === TODAY.slice(0,7);
 const isTD  = d => d === TODAY;
 const mean  = a => a.length ? a.reduce((x,y)=>x+y,0)/a.length : 0;
+/* Custo médio ponderado pela quantidade.
+   Ignora lançamentos sem preço (ex.: saldo inicial cadastrado com custo 0),
+   que antes puxavam a média para baixo. */
+const weightedAvg = hist => {
+  const valid=(hist||[]).filter(h=>Number(h.price)>0&&Number(h.qty)>0);
+  if(!valid.length){
+    const anyPrice=(hist||[]).filter(h=>Number(h.price)>0);
+    return anyPrice.length?mean(anyPrice.map(h=>Number(h.price))):0;
+  }
+  const totalQty=valid.reduce((s,h)=>s+Number(h.qty),0);
+  const totalVal=valid.reduce((s,h)=>s+Number(h.qty)*Number(h.price),0);
+  return totalQty>0?totalVal/totalQty:0;
+};
 const pct   = (v,t) => t > 0 ? Math.round((v/t)*100) : 0;
 const uid   = a => (a.length ? Math.max(...a.map(x=>x.id)) : 0)+1;
 
@@ -346,81 +369,272 @@ const forecast = (prod, outsourced) => {
 
 const getAlerts = data => {
   const out = [];
-  data.rawMaterials.filter(m=>m.stock<=m.min).forEach(m=>out.push({type:"err",msg:"Estoque crítico: "+m.desc,page:"stock"}));
-  data.trims.filter(t=>t.stock<=t.min).forEach(t=>out.push({type:"err",msg:"Estoque crítico: "+t.desc,page:"stock"}));
   data.payables.filter(p=>isOD(p.due)&&p.status!=="Pago").forEach(p=>out.push({type:"err",msg:"Vencida: "+p.desc+" — "+R(p.amt),page:"financial"}));
   data.payables.filter(p=>isTD(p.due)&&p.status!=="Pago").forEach(p=>out.push({type:"warn",msg:"Vence hoje: "+p.desc,page:"agenda"}));
   data.productions.filter(p=>p.status!=="Finalizado"&&forecast(p,data.outsourced).late).forEach(p=>out.push({type:"err",msg:"Produção atrasada: "+p.no,page:"productions",prodId:p.id}));
   return out;
 };
 
-// PDF print
+/* Devolve ao estoque tudo que a ordem consumiu (tecido, forro e aviamentos).
+   Usado ao excluir uma produção. */
+async function restoreStock(prod, data, tenantId, setData){
+  if(!prod) return;
+  const fab={};   // rmId -> metros
+  const byColor={}; // rmId -> {cor: metros}
+  (prod.qtys||[]).forEach(q=>{
+    if(q.rmId){
+      fab[q.rmId]=(fab[q.rmId]||0)+(q.fab||0);
+      if(!byColor[q.rmId]) byColor[q.rmId]={};
+      byColor[q.rmId][q.color]=(byColor[q.rmId][q.color]||0)+(q.fab||0);
+    }
+    if(q.forroRmId){
+      fab[q.forroRmId]=(fab[q.forroRmId]||0)+(q.forroFab||0);
+    }
+  });
+  const product=data.products.find(x=>x.id===prod.productId);
+  const trims={};
+  (product?.trimUsage||[]).forEach(tu=>{
+    trims[tu.trimId]=(trims[tu.trimId]||0)+(tu.qty||0)*(prod.total||0);
+  });
+
+  for(const rmId of Object.keys(fab)){
+    const m=data.rawMaterials.find(x=>x.id==rmId);
+    if(!m) continue;
+    const colors=(m.colors||[]).map(c=>{
+      const back=(byColor[rmId]||{})[c.name]||0;
+      return back>0?{...c,stock:(c.stock||0)+back}:c;
+    });
+    const upd=await sb.saveRM({...m,stock:(m.stock||0)+fab[rmId],colors},tenantId);
+    setData(d=>({...d,rawMaterials:d.rawMaterials.map(x=>x.id==rmId?upd:x)}));
+  }
+  for(const [tid,qty] of Object.entries(trims)){
+    const t=data.trims.find(x=>x.id==tid);
+    if(!t) continue;
+    const upd=await sb.saveTrim({...t,stock:(t.stock||0)+qty},tenantId);
+    setData(d=>({...d,trims:d.trims.map(x=>x.id==tid?upd:x)}));
+  }
+}
+
+// PDF print — ficha de corte/costura/acabamento com grade estilo planilha
 const doPrint = (prod, product, step, outs) => {
   const ws = outs.find(o=>(step==="Costura"&&o.name===prod.sewWs)||(step==="Acabamento"&&o.name===prod.finWs)||(step==="Corte"&&o.name===prod.cutWs));
   const cost = step==="Corte"?prod.cutC:step==="Costura"?prod.sewC:prod.finC;
-  const rows = (prod.qtys||[]).map(q=>`<tr><td>${q.color}</td><td>${q.rmName||"—"}</td><td>${q.size}</td><td style="font-weight:700">${q.qty}</td><td>${(q.fab||0).toFixed(2)}m</td></tr>`).join("");
-  const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Ficha ${prod.no}</title>
-<style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,Arial,sans-serif;padding:32px;font-size:13px;color:#0c0c0b}
-.brand{font-size:18px;font-weight:800;letter-spacing:-0.5px;margin-bottom:2px}.brand span{color:#1A6BF5}
-.subtitle{font-size:11px;color:#767672;margin-bottom:24px}
-h1{font-size:20px;font-weight:700;margin-bottom:4px;letter-spacing:-0.4px}
-.sub{font-size:12px;color:#767672;margin-bottom:20px}
-.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:18px}
-.box{background:#F3F3F1;border-radius:8px;padding:10px 12px}
-.box label{font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:#B0B0AC;display:block;margin-bottom:2px}
-.box strong{font-size:14px;font-weight:600}
-table{width:100%;border-collapse:collapse;margin:14px 0}
-th{padding:8px 12px;text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:#767672;border-bottom:2px solid #EBEBEA}
-td{padding:8px 12px;border-bottom:1px solid #F3F3F1;font-size:13px}
-.cost{background:#EDF2FF;border-radius:8px;padding:14px 16px;display:flex;justify-content:space-between;align-items:center;margin:14px 0}
-.cost-label{font-size:11px;color:#3D3D3B}
-.cost-val{font-size:22px;font-weight:800;color:#1A6BF5}
-.signs{display:grid;grid-template-columns:1fr 1fr;gap:32px;margin-top:48px}
-.sign-line{border-top:1px solid #B0B0AC;padding-top:8px;font-size:11px;color:#767672;text-align:center;margin-top:40px}
-.footer{margin-top:20px;padding-top:12px;border-top:1px solid #EBEBEA;font-size:10px;color:#B0B0AC;display:flex;justify-content:space-between}
-@media print{body{padding:16px}}
-</style></head><body>
+
+  // ── Grade cor × tamanho (matriz) ──
+  const qtys = prod.qtys||[];
+  const colors = [...new Set(qtys.map(q=>q.color))].filter(Boolean);
+  const sizes  = [...new Set(qtys.map(q=>q.size))].filter(Boolean);
+  const cell = (c,sz) => qtys.filter(q=>q.color===c&&q.size===sz).reduce((s,q)=>s+(q.qty||0),0);
+  const rowTotal = c => sizes.reduce((s,sz)=>s+cell(c,sz),0);
+  const colTotal = sz => colors.reduce((s,c)=>s+cell(c,sz),0);
+  const grandTotal = colors.reduce((s,c)=>s+rowTotal(c),0);
+  const fabOf = c => qtys.filter(q=>q.color===c).reduce((s,q)=>s+(q.fab||0),0);
+  const forroOf = c => qtys.filter(q=>q.color===c).reduce((s,q)=>s+(q.forroFab||0),0);
+  const rmOf = c => qtys.find(q=>q.color===c)?.rmName||"—";
+  const forroRmOf = c => qtys.find(q=>q.color===c&&q.forroRmName)?.forroRmName||null;
+  const hasForro = qtys.some(q=>q.forroFab>0);
+  const totalFab = colors.reduce((s,c)=>s+fabOf(c),0);
+  const totalForro = colors.reduce((s,c)=>s+forroOf(c),0);
+
+  const gradeRows = colors.map(c=>`<tr>
+    <td class="lft"><b>${c}</b><div class="rm">${rmOf(c)}</div></td>
+    ${sizes.map(sz=>{const v=cell(c,sz);return `<td class="${v?"":"zero"}">${v||"·"}</td>`}).join("")}
+    <td class="tot">${rowTotal(c)}</td>
+    <td class="mtr">${fabOf(c).toFixed(2)}m</td>
+    ${hasForro?`<td class="mtr">${forroOf(c)?forroOf(c).toFixed(2)+"m":"—"}</td>`:""}
+  </tr>`).join("");
+
+  const html = `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"><title>Ficha ${prod.no}</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+@page{size:A4;margin:12mm}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;padding:28px;font-size:13px;color:#0c0c0b;background:#fff}
+.wrap{max-width:190mm;margin:0 auto}
+.brand{font-size:18px;font-weight:800;letter-spacing:-.5px;margin-bottom:2px}.brand span{color:#1A6BF5}
+.subtitle{font-size:11px;color:#767672;margin-bottom:22px}
+.head{display:flex;justify-content:space-between;align-items:flex-start;gap:24px;
+  padding-bottom:16px;border-bottom:2px solid #0c0c0b;margin-bottom:18px}
+h1{font-size:20px;font-weight:700;margin-bottom:3px;letter-spacing:-.4px}
+.op{font-size:12px;color:#767672}
+.step{display:inline-block;padding:5px 13px;border-radius:20px;background:#0c0c0b;color:#fff;
+  font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.07em}
+.meta{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:24px}
+.lbl{font-size:9.5px;color:#767672;text-transform:uppercase;letter-spacing:.07em;font-weight:600;margin-bottom:3px}
+.val{font-size:14px;font-weight:600;letter-spacing:-.01em}
+h2{font-size:10px;text-transform:uppercase;letter-spacing:.09em;color:#767672;margin:0 0 9px;font-weight:700}
+/* grade estilo planilha */
+table.grade{width:100%;border-collapse:collapse;margin-bottom:22px;font-variant-numeric:tabular-nums}
+table.grade th{background:#0c0c0b;color:#fff;padding:9px 8px;font-size:11px;font-weight:700;
+  text-align:center;border:1px solid #0c0c0b;white-space:nowrap}
+table.grade th.lft{text-align:left;min-width:130px}
+table.grade td{padding:9px 8px;text-align:center;border:1px solid #d8d8d4;font-size:13px}
+table.grade td.lft{text-align:left;font-size:12.5px;line-height:1.35}
+table.grade td .rm{font-size:10px;color:#767672;font-weight:400;margin-top:1px}
+table.grade td.zero{color:#c4c4c0}
+table.grade td.tot{font-weight:800;background:#f3f3f1}
+table.grade td.mtr{font-size:11.5px;color:#3d3d3b;background:#fafaf8}
+table.grade tr:nth-child(even) td{background:#fbfbf9}
+table.grade tr:nth-child(even) td.tot{background:#eeeeec}
+table.grade tr.sum td{background:#f3f3f1;font-weight:800;border-top:2px solid #0c0c0b}
+table.grade tr.sum td.grand{background:#0c0c0b;color:#fff}
+.costs{width:100%;border-collapse:collapse;margin-bottom:6px}
+.costs td{border:none;border-bottom:1px solid #f0f0ee;padding:10px 0;font-size:13px}
+.costs td.r{text-align:right;font-weight:650;font-variant-numeric:tabular-nums}
+.costs tr.f td{border-bottom:none;border-top:2px solid #0c0c0b;padding-top:13px;font-size:16px;font-weight:750}
+.note{margin-top:20px;padding:13px 15px;background:#f3f3f1;border-radius:8px;font-size:12px;color:#3d3d3b;line-height:1.55}
+.sign{margin-top:44px;display:grid;grid-template-columns:1fr 1fr;gap:44px}
+.sign div{border-top:1px solid #0c0c0b;padding-top:7px;font-size:10px;color:#767672;text-align:center}
+.foot{margin-top:28px;padding-top:12px;border-top:1px solid #e5e5e3;display:flex;
+  justify-content:space-between;font-size:10px;color:#a0a09c}
+@media print{body{padding:0}.np{display:none!important}}
+</style></head><body><div class="wrap">
 <div class="brand">CONTRO<span>fabric</span></div>
-<div class="subtitle">Sistema de Gestão de Confecção</div>
-<h1>Ficha de Produção — ${step}</h1>
-<div class="sub">${prod.no} · Emitida em ${FD(TODAY)}</div>
-<div class="grid">
-<div class="box"><label>Produto</label><strong>${product?.name||"—"}</strong></div>
-<div class="box"><label>SKU</label><strong style="font-family:monospace">${product?.sku||"—"}</strong></div>
-<div class="box"><label>Data de Início</label><strong>${FD(prod.start)}</strong></div>
-<div class="box"><label>Total de Peças</label><strong>${prod.total} peças</strong></div>
-<div class="box"><label>Oficina Responsável</label><strong>${ws?.name||"—"}</strong></div>
-<div class="box"><label>Contato</label><strong>${ws?.phone||"—"}</strong></div>
+<div class="subtitle">Gestão de Produção</div>
+<div class="head">
+  <div><h1>Ficha de ${step}</h1><div class="op">${prod.no} · emitida em ${FD(TODAY)}</div></div>
+  <div class="step">${step}</div>
 </div>
-<table><thead><tr><th>Cor</th><th>Tecido</th><th>Tam.</th><th>Peças</th><th>Tecido (m)</th></tr></thead>
-<tbody>${rows}
-<tr style="font-weight:700;background:#F3F3F1"><td colspan="3">TOTAL</td><td>${prod.total}</td><td>${(prod.totalFab||0).toFixed(2)}m</td></tr>
+<div class="meta">
+  <div><div class="lbl">Produto</div><div class="val">${product?.name||"—"}</div></div>
+  <div><div class="lbl">SKU</div><div class="val">${product?.sku||"—"}</div></div>
+  <div><div class="lbl">Oficina</div><div class="val">${ws?.name||"—"}</div></div>
+  <div><div class="lbl">Total de peças</div><div class="val">${grandTotal} pç</div></div>
+</div>
+<h2>Grade de produção</h2>
+<table class="grade">
+  <thead><tr>
+    <th class="lft">Cor / Tecido</th>
+    ${sizes.map(sz=>`<th>${sz}</th>`).join("")}
+    <th>Total</th><th>Tecido</th>${hasForro?"<th>Forro</th>":""}
+  </tr></thead>
+  <tbody>
+    ${gradeRows}
+    <tr class="sum">
+      <td class="lft">TOTAL</td>
+      ${sizes.map(sz=>`<td>${colTotal(sz)}</td>`).join("")}
+      <td class="grand">${grandTotal}</td>
+      <td>${totalFab.toFixed(2)}m</td>
+      ${hasForro?`<td>${totalForro.toFixed(2)}m</td>`:""}
+    </tr>
+  </tbody>
+</table>
+${hasForro?`<div class="note"><b>Forro:</b> ${[...new Set(colors.map(c=>forroRmOf(c)).filter(Boolean))].join(", ")||"—"} · total ${totalForro.toFixed(2)}m</div>`:""}
+<h2 style="margin-top:22px">Valores desta etapa</h2>
+<table class="costs"><tbody>
+  <tr><td>Serviço de ${step.toLowerCase()}</td><td class="r">${grandTotal} pç</td><td class="r">${R(cost||0)}</td></tr>
+  <tr class="f"><td>Total a pagar</td><td></td><td class="r">${R(cost||0)}</td></tr>
 </tbody></table>
-<div class="cost"><div class="cost-label">${step} · ${prod.total} peças</div><div class="cost-val">${R(cost)}</div></div>
-<div class="signs"><div><div class="sign-line">Responsável pela Expedição</div></div><div><div class="sign-line">Recebimento — ${ws?.name||step}</div></div></div>
-<div class="footer"><span>CONTROfabric · Sistema de Gestão de Confecção</span><span>${prod.no} · ${step} · ${FD(TODAY)}</span></div>
-</body></html>`;
-  // Impressão: tenta iframe oculto; se bloqueado (sandbox), mostra a ficha em overlay para visualizar/salvar/imprimir manualmente
-  try {
-    const old = document.getElementById("__print_frame__");
-    if (old) old.remove();
-    const iframe = document.createElement("iframe");
-    iframe.id = "__print_frame__";
-    iframe.style.position = "fixed"; iframe.style.right = "0"; iframe.style.bottom = "0";
-    iframe.style.width = "0"; iframe.style.height = "0"; iframe.style.border = "0";
-    document.body.appendChild(iframe);
-    const doc = iframe.contentWindow.document;
-    doc.open(); doc.write(html); doc.close();
-    let printed = false;
-    setTimeout(() => {
-      try { iframe.contentWindow.focus(); iframe.contentWindow.print(); printed = true; }
-      catch (e) { if(_fichaFn) _fichaFn(html); }
-    }, 350);
-    // Fallback de segurança: alguns ambientes (preview) bloqueiam print silenciosamente
-    if (_fichaFn) _fichaFn(html);
-  } catch (e) {
-    if(_fichaFn) _fichaFn(html); else showToast("Não foi possível gerar a ficha.", "err");
-  }
+<div class="sign"><div>Responsável pela oficina</div><div>Conferido por</div></div>
+<div class="foot"><span>CONTROfabric</span><span>Emitido em ${new Date().toLocaleString("pt-BR")}</span></div>
+<div class="np" style="margin-top:26px;display:flex;gap:10px">
+  <button onclick="window.print()" style="padding:12px 26px;background:#0c0c0b;color:#fff;border:none;border-radius:9px;font:600 14px -apple-system,sans-serif;cursor:pointer">Salvar como PDF / Imprimir</button>
+</div>
+</div></body></html>`;
+
+  const w = window.open("","_blank","width=920,height=840");
+  if (w) { w.document.write(html); w.document.close(); w.onload=()=>setTimeout(()=>w.print(),350); }
+  else if (_fichaFn) _fichaFn(html);
+  else showToast("Permita pop-ups para gerar a ficha.","err");
+};
+
+// Ficha de custo do produto
+const printCostSheet = (prod, data) => {
+  const c = calcProductCost(prod, data);
+  const pct = v => c.total>0 ? ((v/c.total)*100).toFixed(1).replace(".",",")+"%" : "—";
+  const linhas = [
+    ["Tecido principal", c.fabric, "consumo médio × custo médio do tecido"],
+    c.forro>0 && ["Forro", c.forro, "média das ordens com forro"],
+    ["Aviamentos", c.trim, "soma dos aviamentos por peça"],
+    ["Corte", c.cut, "pago ao terceirizado"],
+    ["Costura", c.sew, "pago ao terceirizado"],
+    ["Acabamento", c.fin, "pago ao terceirizado"],
+  ].filter(Boolean);
+
+  const cores = (prod.colorFabrics||[]).map(cf=>{
+    const rm=data.rawMaterials.find(r=>r.id===cf.rmId);
+    const cons=(prod.sizes||[]).map(sz=>cf.cons?.[sz]||0).filter(v=>v>0);
+    const avg=cons.length?cons.reduce((a,b)=>a+b,0)/cons.length:0;
+    return `<tr><td class="lft"><b>${cf.color}</b></td><td class="lft">${rm?.desc||"—"}</td>
+      <td>${avg.toFixed(2)}m</td><td>${R(rm?.avgCost||0)}</td><td class="tot">${R(avg*(rm?.avgCost||0))}</td></tr>`;
+  }).join("");
+
+  const avi = (prod.trimUsage||[]).map(tu=>{
+    const t=data.trims.find(x=>x.id===tu.trimId);
+    if(!t) return "";
+    return `<tr><td class="lft" colspan="2">${t.desc}</td><td>${tu.qty} ${t.unit||""}</td>
+      <td>${R(t.avgCost||0)}</td><td class="tot">${R((t.avgCost||0)*(tu.qty||0))}</td></tr>`;
+  }).join("");
+
+  const html = `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"><title>Custo ${prod.sku||prod.name}</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+@page{size:A4;margin:12mm}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;padding:28px;font-size:13px;color:#0c0c0b;background:#fff}
+.wrap{max-width:190mm;margin:0 auto}
+.brand{font-size:18px;font-weight:800;letter-spacing:-.5px;margin-bottom:2px}.brand span{color:#1A6BF5}
+.subtitle{font-size:11px;color:#767672;margin-bottom:22px}
+.head{display:flex;justify-content:space-between;align-items:flex-start;gap:24px;
+  padding-bottom:16px;border-bottom:2px solid #0c0c0b;margin-bottom:18px}
+h1{font-size:20px;font-weight:700;margin-bottom:3px;letter-spacing:-.4px}
+.op{font-size:12px;color:#767672}
+.meta{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:24px}
+.lbl{font-size:9.5px;color:#767672;text-transform:uppercase;letter-spacing:.07em;font-weight:600;margin-bottom:3px}
+.val{font-size:14px;font-weight:600}
+h2{font-size:10px;text-transform:uppercase;letter-spacing:.09em;color:#767672;margin:0 0 9px;font-weight:700}
+table{width:100%;border-collapse:collapse;margin-bottom:22px;font-variant-numeric:tabular-nums}
+th{background:#0c0c0b;color:#fff;padding:9px 10px;font-size:11px;font-weight:700;text-align:center;border:1px solid #0c0c0b}
+th.lft{text-align:left}
+td{padding:9px 10px;text-align:center;border:1px solid #d8d8d4;font-size:12.5px}
+td.lft{text-align:left}
+td.tot{font-weight:700;background:#f3f3f1}
+tr:nth-child(even) td{background:#fbfbf9}
+tr:nth-child(even) td.tot{background:#eeeeec}
+.big{background:#0c0c0b;color:#fff;border-radius:10px;padding:20px 24px;margin-bottom:22px;
+  display:flex;justify-content:space-between;align-items:center}
+.big .k{font-size:12px;color:rgba(255,255,255,.65);text-transform:uppercase;letter-spacing:.07em;font-weight:600}
+.big .v{font-size:30px;font-weight:800;letter-spacing:-.03em;font-variant-numeric:tabular-nums}
+.bar{display:flex;height:9px;border-radius:5px;overflow:hidden;margin-bottom:8px}
+.leg{display:flex;flex-wrap:wrap;gap:14px;font-size:11px;color:#3d3d3b;margin-bottom:22px}
+.leg i{width:9px;height:9px;border-radius:3px;display:inline-block;margin-right:5px}
+.note{padding:13px 15px;background:#f3f3f1;border-radius:8px;font-size:11.5px;color:#3d3d3b;line-height:1.6}
+.foot{margin-top:28px;padding-top:12px;border-top:1px solid #e5e5e3;display:flex;
+  justify-content:space-between;font-size:10px;color:#a0a09c}
+@media print{body{padding:0}.np{display:none!important}}
+</style></head><body><div class="wrap">
+<div class="brand">CONTRO<span>fabric</span></div>
+<div class="subtitle">Gestão de Produção</div>
+<div class="head">
+  <div><h1>Ficha de Custo</h1><div class="op">${prod.name} · emitida em ${FD(TODAY)}</div></div>
+</div>
+<div class="meta">
+  <div><div class="lbl">SKU</div><div class="val">${prod.sku||"—"}</div></div>
+  <div><div class="lbl">Categoria</div><div class="val">${prod.category||"—"}</div></div>
+  <div><div class="lbl">Coleção</div><div class="val">${prod.collection||"—"}</div></div>
+  <div><div class="lbl">Tamanhos</div><div class="val">${(prod.sizes||[]).join(", ")||"—"}</div></div>
+</div>
+<div class="big"><div><div class="k">Custo médio por peça</div></div><div class="v">${R(c.total)}</div></div>
+<div class="bar">
+  ${[[c.fabric,"#1A6BF5"],[c.forro,"#5B21B6"],[c.trim,"#B45309"],[c.cut,"#16A34A"],[c.sew,"#0891B2"],[c.fin,"#C13515"]]
+    .filter(([v])=>v>0).map(([v,col])=>`<div style="width:${(v/(c.total||1))*100}%;background:${col}"></div>`).join("")}
+</div>
+<div class="leg">
+  ${[["Tecido",c.fabric,"#1A6BF5"],["Forro",c.forro,"#5B21B6"],["Aviamentos",c.trim,"#B45309"],
+     ["Corte",c.cut,"#16A34A"],["Costura",c.sew,"#0891B2"],["Acabamento",c.fin,"#C13515"]]
+    .filter(([,v])=>v>0).map(([l,v,col])=>`<span><i style="background:${col}"></i>${l} ${pct(v)}</span>`).join("")}
+</div>
+<h2>Composição do custo</h2>
+<table><thead><tr><th class="lft">Item</th><th class="lft">Base de cálculo</th><th>Valor</th><th>% do total</th></tr></thead>
+<tbody>${linhas.map(([l,v,b])=>`<tr><td class="lft"><b>${l}</b></td><td class="lft" style="color:#767672;font-size:11.5px">${b}</td><td class="tot">${R(v)}</td><td>${pct(v)}</td></tr>`).join("")}
+<tr><td class="lft" colspan="2"><b>TOTAL POR PEÇA</b></td><td class="tot">${R(c.total)}</td><td>100%</td></tr></tbody></table>
+${cores?`<h2>Tecido por cor</h2><table><thead><tr><th class="lft">Cor</th><th class="lft">Tecido</th><th>Consumo médio</th><th>Custo/m</th><th>Custo</th></tr></thead><tbody>${cores}</tbody></table>`:""}
+${avi?`<h2>Aviamentos</h2><table><thead><tr><th class="lft" colspan="2">Item</th><th>Qtd/peça</th><th>Custo unit.</th><th>Custo</th></tr></thead><tbody>${avi}</tbody></table>`:""}
+<div class="note"><b>Como o custo é calculado:</b> o tecido usa o consumo médio entre os tamanhos multiplicado pelo custo médio ponderado das compras, dividido pelo número de cores. Corte, costura e acabamento são os valores pagos aos terceirizados por peça. O custo muda conforme novas compras alteram o custo médio dos materiais.</div>
+<div class="foot"><span>CONTROfabric</span><span>Emitido em ${new Date().toLocaleString("pt-BR")}</span></div>
+<div class="np" style="margin-top:26px"><button onclick="window.print()" style="padding:12px 26px;background:#0c0c0b;color:#fff;border:none;border-radius:9px;font:600 14px -apple-system,sans-serif;cursor:pointer">Salvar como PDF / Imprimir</button></div>
+</div></body></html>`;
+  const w = window.open("","_blank","width=920,height=840");
+  if (w) { w.document.write(html); w.document.close(); w.onload=()=>setTimeout(()=>w.print(),350); }
+  else showToast("Permita pop-ups para gerar a ficha de custo.","err");
 };
 
 // Ficha viewer global (fallback quando impressão é bloqueada no preview)
@@ -843,7 +1057,7 @@ function LoginPage({ onLogin }) {
   ];
 
   return (
-    <div style={{minHeight:"100vh",display:"flex",fontFamily:"-apple-system,BlinkMacSystemFont,\'Inter\',sans-serif",background:DS.bg}}>
+    <div style={{minHeight:"100vh",display:"flex",fontFamily:DS.font,background:DS.bg}}>
       <style>{GLOBAL_CSS}</style>
       {!isSmall && (
         <div style={{flex:"1 1 50%",background:`linear-gradient(155deg, #0C0C0B 0%, #1A1A18 55%, #232320 100%)`,display:"flex",flexDirection:"column",justifyContent:"space-between",padding:"56px 56px",position:"relative",overflow:"hidden"}}>
@@ -1198,7 +1412,6 @@ function PgDash({ data, goTo, currentUser }) {
         <div style={{display:"grid",gridTemplateColumns:isSmall?"1fr":"repeat(auto-fit, minmax(200px, 240px))",gap:10,marginTop:36}}>
           {alLate>0&&<AlertCard color={DS.err} count={alLate} label="Produções atrasadas" hint="Prazo de entrega excedido" onClick={()=>goTo("productions","late")}/>}
           {alDue>0&&<AlertCard color={DS.err} count={alDue} label="Contas vencidas" hint="Pagamentos em atraso" onClick={()=>goTo("financial")}/>}
-          {alStock>0&&<AlertCard color={DS.warn} count={alStock} label="Estoque crítico" hint="Itens abaixo do mínimo" onClick={()=>goTo("stock")}/>}
         </div>
       )}
 
@@ -1301,9 +1514,9 @@ function PgDash({ data, goTo, currentUser }) {
 
       {/* ── OPERATIONS ROW: Stock + Workshops ── */}
       <div style={{display:"grid",gridTemplateColumns:isMid?"1fr":"1fr 1fr",gap:isSmall?32:48,marginTop:48}}>
-        <Section label="Estoque crítico" action={<button onClick={()=>goTo("stock")} style={linkBtn()}>Ver estoque →</button>}>
+        <Section label="Estoque" action={<button onClick={()=>goTo("stock")} style={linkBtn()}>Ver estoque →</button>}>
           {critical.length===0
-            ? <div style={{fontSize:13,color:DS.i3,padding:"8px 0"}}>Nenhum item em nível crítico</div>
+            ? <div style={{fontSize:13,color:DS.i3,padding:"8px 0"}}>Estoque em dia</div>
             : <div style={{display:"flex",flexDirection:"column",gap:0}}>
                 {critical.slice(0,6).map((item,i)=>(
                   <div key={item.id+item.tp} onClick={()=>goTo("stock")} style={{display:"flex",alignItems:"center",gap:11,cursor:"pointer",padding:"11px 0",borderBottom:i<Math.min(critical.length,6)-1?`1px solid ${DS.bd}`:"none"}}>
@@ -1581,7 +1794,7 @@ function PgProductions({ data, setData, reload, tenantId, fInit }) {
                 {prod.status!=="Finalizado"&&<Btn onClick={()=>advance(prod)}>Avançar → {STEPS[STEPS.indexOf(prod.status)+1]}</Btn>}
                 <Btn v="secondary" icon={<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M3.5 5V1.5h7V5M3.5 10.5h-1a1 1 0 01-1-1V6a1 1 0 011-1h9a1 1 0 011 1v3.5a1 1 0 01-1 1h-1M3.5 8.5h7v4h-7z"/></svg>} onClick={()=>doPrint(prod,pr,prod.status,data.outsourced)}>Imprimir Ficha</Btn>
                 <Btn v="danger" icon={<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M2 3.5h10M5 3.5V2.5a.5.5 0 01.5-.5h3a.5.5 0 01.5.5v1M5.5 6v4M8.5 6v4M3 3.5l.7 8a1 1 0 001 .9h4.6a1 1 0 001-.9l.7-8"/></svg>}
-                  onClick={()=>confirmDelete(async()=>{try{await sb.deleteProd(prod.id);setData(d=>({...d,productions:d.productions.filter(p=>p.id!==prod.id),payables:d.payables.filter(p=>p.prodId!==prod.id)}));setSelId(null);}catch(e){showToast("Erro: "+e.message,"err");}},{title:"Excluir produção",message:"A produção "+prod.no+" e as contas geradas por ela serão excluídas. Esta ação não pode ser desfeita."})}>Excluir</Btn>
+                  onClick={()=>confirmDelete(async()=>{try{await restoreStock(prod,data,tenantId,setData);await sb.deleteProd(prod.id);setData(d=>({...d,productions:d.productions.filter(p=>p.id!==prod.id),payables:d.payables.filter(p=>p.prodId!==prod.id)}));setSelId(null);showToast("Produção excluída e estoque devolvido.","ok");}catch(e){showToast("Erro: "+e.message,"err");}},{title:"Excluir produção",message:"A produção "+prod.no+" e as contas geradas por ela serão excluídas, e o tecido e os aviamentos consumidos voltarão ao estoque."})}>Excluir</Btn>
               </div>
             </div>
           );
@@ -1694,7 +1907,7 @@ function PgCutOrder({ data, setData, reload, tenantId }) {
     } catch(e){ showToast("Erro ao criar OP: "+e.message,"err"); }
   };
 
-  const delProd = (id,e) => { e.stopPropagation(); confirmDelete(async()=>{try{await sb.deleteProd(id);setData(d=>({...d,productions:d.productions.filter(p=>p.id!==id),payables:d.payables.filter(p=>p.prodId!==id)}));}catch(e){showToast("Erro: "+e.message,"err");}},{title:"Excluir ordem de corte",message:"A produção e as contas geradas por ela (corte, costura, acabamento) serão excluídas. Esta ação não pode ser desfeita."}); };
+  const delProd = (id,e) => { e.stopPropagation(); const prod=data.productions.find(p=>p.id===id); confirmDelete(async()=>{try{await restoreStock(prod,data,tenantId,setData);await sb.deleteProd(id);setData(d=>({...d,productions:d.productions.filter(p=>p.id!==id),payables:d.payables.filter(p=>p.prodId!==id)}));showToast("Ordem excluída e estoque devolvido.","ok");}catch(e){showToast("Erro: "+e.message,"err");}},{title:"Excluir ordem de corte",message:"A ordem e as contas geradas por ela serão excluídas, e o tecido e os aviamentos consumidos voltarão ao estoque."}); };
 
   const activeProds = data.productions.filter(p=>p.status!=="Finalizado");
 
@@ -2291,13 +2504,32 @@ function PgFinancial({ data, setData, reload, tenantId, fInit }) {
 // ═══════════════════════════════════════════════════════════════════════════════
 function PgAgenda({ data, setData, reload, tenantId }) {
   const [sel,setSel] = useState(null);
+  const [mes,setMes] = useState("prox");   // "prox" = próximos vencimentos | "YYYY-MM"
   const pend = data.payables.filter(p=>p.status!=="Pago");
-  const secs = [
-    {t:"Vencidas",      c:DS.err,  items:pend.filter(p=>isOD(p.due)), bg:DS.errSft,  bd:DS.errBd},
-    {t:"Hoje",          c:DS.warn, items:pend.filter(p=>isTD(p.due)&&!isOD(p.due)), bg:DS.warnSft, bd:DS.warnBd},
-    {t:"Próximos 7 dias",c:DS.blue,items:pend.filter(p=>!isOD(p.due)&&!isTD(p.due)&&isWK(p.due)), bg:DS.blueSft, bd:DS.blueBd},
-    {t:"Este mês",      c:DS.i1,  items:pend.filter(p=>!isWK(p.due)&&isMO(p.due)), bg:DS.surEl, bd:DS.bd},
-  ];
+
+  /* meses que têm contas em aberto, mais recente primeiro */
+  const mesesDisponiveis = [...new Set(pend.map(p=>(p.due||"").slice(0,7)).filter(Boolean))].sort();
+  const nomeMes = ym => {
+    if(!ym) return "";
+    const [y,m]=ym.split("-");
+    const nm=["jan","fev","mar","abr","mai","jun","jul","ago","set","out","nov","dez"][parseInt(m)-1];
+    return nm+"/"+y.slice(-2);
+  };
+
+  const doMes = mes!=="prox";
+  const doMesItems = pend.filter(p=>(p.due||"").slice(0,7)===mes);
+  const secs = doMes
+    ? [
+        {t:"Vencidas em "+nomeMes(mes), c:DS.err, items:doMesItems.filter(p=>isOD(p.due)), bg:DS.errSft, bd:DS.errBd},
+        {t:"A vencer em "+nomeMes(mes), c:DS.i1,  items:doMesItems.filter(p=>!isOD(p.due)), bg:DS.surEl, bd:DS.bd},
+      ]
+    : [
+        {t:"Vencidas",      c:DS.err,  items:pend.filter(p=>isOD(p.due)), bg:DS.errSft,  bd:DS.errBd},
+        {t:"Hoje",          c:DS.warn, items:pend.filter(p=>isTD(p.due)&&!isOD(p.due)), bg:DS.warnSft, bd:DS.warnBd},
+        {t:"Próximos 7 dias",c:DS.blue,items:pend.filter(p=>!isOD(p.due)&&!isTD(p.due)&&isWK(p.due)), bg:DS.blueSft, bd:DS.blueBd},
+        {t:"Este mês",      c:DS.i1,  items:pend.filter(p=>!isWK(p.due)&&isMO(p.due)), bg:DS.surEl, bd:DS.bd},
+      ];
+  const totalVisivel = secs.reduce((s,x)=>s+x.items.reduce((a,p)=>a+p.amt,0),0);
   const doPay = async id => { try{ const u=await sb.updatePayStatus(id,"Pago",TODAY); setData(d=>({...d,payables:d.payables.map(p=>p.id===id?u:p)})); }catch(e){showToast("Erro: "+e.message,"err");} };
 
   const agProd = sel ? data.productions.find(p=>p.id===sel.prodId)||null : null;
@@ -2305,9 +2537,42 @@ function PgAgenda({ data, setData, reload, tenantId }) {
 
   return (
     <div>
-      <SH title="Agenda de Pagamentos" sub="Próximos vencimentos e alertas"/>
+      <SH title="Agenda de Pagamentos"
+        sub={doMes?`Contas em aberto de ${nomeMes(mes)} · ${R(totalVisivel)}`:"Próximos vencimentos e alertas"}/>
+
+      {/* Filtro por mês */}
+      <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center",marginBottom:20,
+        paddingBottom:16,borderBottom:`1px solid ${DS.bd}`}}>
+        <span style={{fontSize:11,fontWeight:600,color:DS.i3,letterSpacing:".05em",
+          textTransform:"uppercase",marginRight:4}}>Período</span>
+        <button onClick={()=>setMes("prox")}
+          style={{height:34,padding:"0 14px",borderRadius:DS.r8,cursor:"pointer",fontFamily:"inherit",
+            fontSize:13,fontWeight:mes==="prox"?600:500,
+            border:`1px solid ${mes==="prox"?DS.ink:DS.bd}`,
+            background:mes==="prox"?DS.ink:"transparent",
+            color:mes==="prox"?"#fff":DS.i2,transition:`all ${DS.fast}`}}>
+          Próximos
+        </button>
+        {mesesDisponiveis.map(ym=>{
+          const on=mes===ym;
+          const qtd=pend.filter(p=>(p.due||"").slice(0,7)===ym).length;
+          return (
+            <button key={ym} onClick={()=>setMes(ym)}
+              style={{height:34,padding:"0 14px",borderRadius:DS.r8,cursor:"pointer",fontFamily:"inherit",
+                fontSize:13,fontWeight:on?600:500,display:"inline-flex",alignItems:"center",gap:6,
+                border:`1px solid ${on?DS.ink:DS.bd}`,background:on?DS.ink:"transparent",
+                color:on?"#fff":DS.i2,transition:`all ${DS.fast}`}}>
+              {nomeMes(ym)}
+              <span style={{fontSize:11,fontWeight:700,padding:"1px 6px",borderRadius:10,
+                background:on?"rgba(255,255,255,.2)":DS.surEl,
+                color:on?"#fff":DS.i3}}>{qtd}</span>
+            </button>
+          );
+        })}
+      </div>
+
       {/* Summary strip */}
-      <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8,marginBottom:24}}>
+      <div style={{display:"grid",gridTemplateColumns:`repeat(${secs.length},1fr)`,gap:8,marginBottom:24}}>
         {secs.map(sec=>(
           <div key={sec.t} style={{padding:"12px 14px",borderRadius:DS.r10,background:sec.items.length>0?sec.bg:DS.surEl,border:`1px solid ${sec.items.length>0?sec.bd:DS.bd}`}}>
             <div style={{fontSize:22,fontWeight:800,color:sec.items.length>0?sec.c:DS.i4,fontVariantNumeric:"tabular-nums"}}>{sec.items.length}</div>
@@ -2409,7 +2674,7 @@ function PgStock({ data, setData, reload, tenantId }) {
 
   return (
     <div>
-      <SH title="Estoque" sub={all.length+" itens · "+critical.length+" crítico(s)"}/>
+      <SH title="Estoque" sub={all.length+" itens cadastrados"}/>
       <div style={{marginBottom:16}}>
         <Inp placeholder="Buscar por nome ou código…" value={search} onChange={setSearch}/>
       </div>
@@ -2522,7 +2787,7 @@ function PgPurchases({ data, setData, reload, tenantId }) {
           const m=data.rawMaterials.find(x=>x.id==form.itemId||x.id===form.itemId);
           if(m){
             const newHist=[...(m.hist||[]),{date:form.date,qty:parseFloat(form.qty),price:parseFloat(form.price)}];
-            const newAvg=mean(newHist.map(p=>p.price));
+            const newAvg=weightedAvg(newHist);
             let newColors=m.colors||[];
             if(form.color&&Array.isArray(newColors)){
               newColors=newColors.map(c=>c.name===form.color?{...c,stock:(c.stock||0)+parseFloat(form.qty)}:c);
@@ -2534,7 +2799,7 @@ function PgPurchases({ data, setData, reload, tenantId }) {
           const t=data.trims.find(x=>x.id==form.itemId||x.id===form.itemId);
           if(t){
             const newHist=[...(t.hist||[]),{date:form.date,qty:parseFloat(form.qty),price:parseFloat(form.price)}];
-            const updTrim=await sb.saveTrim({...t,stock:(t.stock||0)+parseFloat(form.qty),avgCost:mean(newHist.map(p=>p.price)),hist:newHist},tenantId);
+            const updTrim=await sb.saveTrim({...t,stock:(t.stock||0)+parseFloat(form.qty),avgCost:weightedAvg(newHist),hist:newHist},tenantId);
             setData(d=>({...d,trims:d.trims.map(x=>x.id===updTrim.id?updTrim:x)}));
           }
         }
@@ -2827,7 +3092,6 @@ function StockItemView({ item, onEdit }) {
           <div key={l} style={{background:DS.surEl,borderRadius:DS.r8,padding:"10px 12px"}}><Lbl ch={l} style={{marginBottom:3}}/><div style={{fontSize:13,fontWeight:500}}>{v}</div></div>
         ))}
       </div>
-      {item.stock<=item.min&&<Bnr type="warn">Estoque crítico — solicite reposição</Bnr>}
       {(item.hist||[]).length>0&&<div>
         <Lbl ch="Histórico de compras" style={{marginBottom:8}}/>
         <div style={{border:`1px solid ${DS.bd}`,borderRadius:DS.r10,overflow:"hidden"}}>
@@ -2841,8 +3105,11 @@ function StockItemView({ item, onEdit }) {
 }
 
 function calcProductCost(prod, data){
-  if(!prod) return {fabric:0,trim:0,cut:0,sew:0,fin:0,total:0};
-  // Tecido: média do consumo entre cores × custo médio do tecido
+  const zero={fabric:0,forro:0,trim:0,cut:0,sew:0,fin:0,total:0};
+  if(!prod) return zero;
+
+  /* Tecido principal — consumo médio entre tamanhos, custo médio do tecido.
+     Média entre as cores, já que cada peça usa uma cor só. */
   let fabric=0;
   (prod.colorFabrics||[]).forEach(cf=>{
     const rm=data.rawMaterials.find(r=>r.id===cf.rmId);
@@ -2853,17 +3120,35 @@ function calcProductCost(prod, data){
       fabric+=avgCons*(rm.avgCost||0);
     }
   });
-  // Média entre cores (cada peça usa uma cor)
   const nColors=(prod.colorFabrics||[]).length||1;
   fabric=fabric/nColors;
-  // Aviamentos
+
+  /* Forro — usa o consumo médio registrado nas ordens de corte deste produto */
+  let forro=0;
+  const ordersWithForro=(data.productions||[])
+    .filter(p=>p.productId===prod.id&&(p.qtys||[]).some(q=>q.forroRmId));
+  if(ordersWithForro.length){
+    let totalForroCost=0,totalPieces=0;
+    ordersWithForro.forEach(p=>{
+      (p.qtys||[]).forEach(q=>{
+        if(!q.forroRmId) return;
+        const rm=data.rawMaterials.find(r=>r.id==q.forroRmId);
+        totalForroCost+=(q.forroFab||0)*(rm?.avgCost||0);
+        totalPieces+=q.qty||0;
+      });
+    });
+    forro=totalPieces>0?totalForroCost/totalPieces:0;
+  }
+
+  /* Aviamentos */
   let trim=0;
   (prod.trimUsage||[]).forEach(tu=>{
     const t=data.trims.find(t=>t.id===tu.trimId);
     if(t) trim+=(t.avgCost||0)*(tu.qty||0);
   });
+
   const cut=prod.cutPrice||0, sew=prod.sewPrice||0, fin=prod.finishPrice||0;
-  return {fabric,trim,cut,sew,fin,total:fabric+trim+cut+sew+fin};
+  return {fabric,forro,trim,cut,sew,fin,total:fabric+forro+trim+cut+sew+fin};
 }
 
 function ProductView({ sel, data, onEdit }) {
@@ -2882,6 +3167,7 @@ function ProductView({ sel, data, onEdit }) {
         <div style={{fontSize:26,fontWeight:780,letterSpacing:"-.6px",marginBottom:10}}>{R(cost.total)}</div>
         <div style={{display:"flex",gap:14,flexWrap:"wrap",fontSize:11,color:"rgba(255,255,255,.7)"}}>
           <span>Tecido {R(cost.fabric)}</span>
+          {cost.forro>0&&<span>Forro {R(cost.forro)}</span>}
           <span>Aviamentos {R(cost.trim)}</span>
           <span>Corte {R(cost.cut)}</span>
           <span>Costura {R(cost.sew)}</span>
@@ -2907,7 +3193,10 @@ function ProductView({ sel, data, onEdit }) {
       {prods.length>0&&<div><Lbl ch="Produções" style={{marginBottom:8}}/>
         {prods.map(p=><div key={p.id} style={{display:"flex",justifyContent:"space-between",padding:"8px 10px",background:DS.surEl,borderRadius:DS.r8,marginBottom:6}}><div><div style={{fontSize:12,fontWeight:600}}>{p.no}</div><div style={{fontSize:11,color:DS.i2}}>{FD(p.start)} · {p.total}pç</div></div><SPill status={p.status} xs/></div>)}
       </div>}
-      <Btn v="secondary" onClick={onEdit}>Editar produto</Btn>
+      <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+        <Btn onClick={()=>printCostSheet(sel,data)}>Imprimir ficha de custo</Btn>
+        <Btn v="secondary" onClick={onEdit}>Editar produto</Btn>
+      </div>
     </div>
   );
 }
@@ -3450,7 +3739,7 @@ export default function App() {
   };
 
   return (
-    <div style={{display:"flex",height:"100vh",background:DS.bg,fontFamily:"-apple-system,BlinkMacSystemFont,\'Inter\',\'Segoe UI\',sans-serif",overflow:"hidden",fontSize:14,color:DS.i1}}>
+    <div style={{display:"flex",height:"100vh",background:DS.bg,fontFamily:DS.font,overflow:"hidden",fontSize:14,color:DS.i1}}>
       <style>{GLOBAL_CSS}</style>
       {!isSmall&&(
         <aside style={{width:sideOpen?236:56,flexShrink:0,background:DS.sur,borderRight:`1px solid ${DS.bd}`,display:"flex",flexDirection:"column",transition:`width ${DS.base}`,overflow:"hidden",height:"100%"}}>
