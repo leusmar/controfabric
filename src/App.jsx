@@ -5,8 +5,25 @@ import { createClient } from "@supabase/supabase-js";
 // ═══════════════════════════════════════════════════════════════════════════════
 // DESIGN SYSTEM
 // ═══════════════════════════════════════════════════════════════════════════════
-const FONT = "-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text', 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif";
+const FONT = "-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif";
+const FONT_DISPLAY = "-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif";
 const FONT_NUM = "'SF Mono', ui-monospace, SFMono-Regular, Menlo, monospace";
+
+/* Escala tipográfica — 12 · 13 · 14 · 16 · 18 · 22 · 28 · 34
+   Corpo em 14/1.5. Títulos com tracking negativo proporcional ao tamanho
+   (quanto maior o texto, mais fechado), como nas interfaces da Apple. */
+const TS = {
+  micro:  {size:11.5, lh:1.45, w:600, ls:".06em"},   // rótulos maiúsculos
+  caption:{size:12.5, lh:1.5,  w:400, ls:"0"},       // apoio
+  body:   {size:14,   lh:1.55, w:400, ls:"-.006em"}, // corpo
+  bodyMd: {size:14,   lh:1.5,  w:550, ls:"-.008em"}, // corpo com ênfase
+  lead:   {size:16,   lh:1.5,  w:400, ls:"-.011em"},
+  h4:     {size:18,   lh:1.35, w:600, ls:"-.016em"},
+  h3:     {size:22,   lh:1.28, w:650, ls:"-.021em"},
+  h2:     {size:28,   lh:1.18, w:680, ls:"-.026em"},
+  h1:     {size:34,   lh:1.12, w:700, ls:"-.032em"},
+};
+const tsCss = t => ({fontSize:t.size,lineHeight:t.lh,fontWeight:t.w,letterSpacing:t.ls});
 
 const DS = {
   font:FONT, fontNum:FONT_NUM,
@@ -39,12 +56,29 @@ const GLOBAL_CSS = `
 @keyframes cf-scale { from { opacity:0; transform:scale(0.97) } to { opacity:1; transform:scale(1) } }
 @keyframes cf-slideUp { from { opacity:0; transform:translateY(16px) } to { opacity:1; transform:translateY(0) } }
 * { box-sizing:border-box; -webkit-font-smoothing:antialiased; -moz-osx-font-smoothing:grayscale; }
-html, body { margin:0; padding:0; font-family:${FONT}; font-synthesis:none;
-  text-rendering:optimizeLegibility; letter-spacing:-0.011em; }
-body { font-size:14px; line-height:1.5; }
-h1,h2,h3 { letter-spacing:-0.022em; font-weight:650; }
-input, select, textarea, button { font-family:inherit; letter-spacing:inherit; }
-.tnum, [style*="tabular-nums"] { font-feature-settings:"tnum","cv01"; }
+html, body { margin:0; padding:0; font-synthesis:none; text-rendering:optimizeLegibility; }
+body { font-family:${FONT}; font-size:14px; line-height:1.55; letter-spacing:-0.006em;
+  font-feature-settings:"kern","liga","calt"; }
+
+/* Títulos: fonte de display e tracking proporcional ao tamanho */
+h1,h2,h3,h4 { font-family:${FONT_DISPLAY}; margin:0; }
+h1 { font-size:34px; line-height:1.12; font-weight:700; letter-spacing:-.032em; }
+h2 { font-size:28px; line-height:1.18; font-weight:680; letter-spacing:-.026em; }
+h3 { font-size:22px; line-height:1.28; font-weight:650; letter-spacing:-.021em; }
+h4 { font-size:18px; line-height:1.35; font-weight:600; letter-spacing:-.016em; }
+
+/* Corpo nunca abaixo de 12px */
+small, .caption { font-size:12.5px; line-height:1.5; }
+
+input, select, textarea, button { font-family:inherit; letter-spacing:inherit; font-size:inherit; }
+input::placeholder, textarea::placeholder { color:#B0B0AC; letter-spacing:-.004em; }
+
+/* Números tabulares: colunas sempre alinhadas */
+.tnum, [style*="tabular-nums"] { font-variant-numeric:tabular-nums;
+  font-feature-settings:"tnum","zero","cv01"; }
+
+/* Evita zoom automático no iOS ao focar um campo */
+@media (max-width:768px){ input,select,textarea { font-size:16px !important; } }
 html, body { margin:0; padding:0; max-width:100%; overflow-x:hidden; }
 *::-webkit-scrollbar { width:10px; height:10px; }
 *::-webkit-scrollbar-thumb { background:rgba(0,0,0,0.12); border-radius:8px; border:2px solid transparent; background-clip:padding-box; }
@@ -2127,6 +2161,7 @@ function PgFinancial({ data, setData, reload, tenantId, fInit }) {
   const [fCat,setFC] = useState("all");
   const [fSt,setFS]  = useState("all");
   const [fPer,setFP] = useState(fInit||"all");
+  const [fMes,setFMes] = useState("all");
   const [sel,setSel] = useState(null);
   const [showF,setShowF] = useState(false);
   const [showChat,setShowChat] = useState(false);
@@ -2291,8 +2326,14 @@ function PgFinancial({ data, setData, reload, tenantId, fInit }) {
     if(fPer==="today"&&!isTD(p.due)) return false;
     if(fPer==="week"&&!isWK(p.due)) return false;
     if(fPer==="month"&&!isMO(p.due)) return false;
+    if(fMes!=="all"&&(p.due||"").slice(0,7)!==fMes) return false;
     return true;
   });
+
+  /* meses com lançamentos, do mais recente ao mais antigo */
+  const mesesFin = [...new Set(data.payables.map(p=>(p.due||"").slice(0,7)).filter(Boolean))].sort().reverse();
+  const nomeMesFin = ym => { if(!ym) return ""; const [y,m]=ym.split("-");
+    return ["jan","fev","mar","abr","mai","jun","jul","ago","set","out","nov","dez"][parseInt(m)-1]+"/"+y.slice(-2); };
 
   const cats = ["all",...new Set(data.payables.map(p=>p.cat))];
   const sumP = arr => arr.reduce((s,p)=>s+p.amt,0);
@@ -2305,6 +2346,38 @@ function PgFinancial({ data, setData, reload, tenantId, fInit }) {
           <Btn onClick={()=>{setForm(EF);setShowF(true);}}>+ Nova despesa</Btn>
         </div>
       }/>
+
+      {/* Filtro por mês */}
+      {mesesFin.length>0&&(
+        <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center",marginBottom:20,
+          paddingBottom:16,borderBottom:`1px solid ${DS.bd}`}}>
+          <span style={{fontSize:11,fontWeight:600,color:DS.i3,letterSpacing:".05em",
+            textTransform:"uppercase",marginRight:4}}>Mês</span>
+          <button onClick={()=>setFMes("all")}
+            style={{height:34,padding:"0 14px",borderRadius:DS.r8,cursor:"pointer",fontFamily:"inherit",
+              fontSize:13,fontWeight:fMes==="all"?600:500,
+              border:`1px solid ${fMes==="all"?DS.ink:DS.bd}`,
+              background:fMes==="all"?DS.ink:"transparent",
+              color:fMes==="all"?"#fff":DS.i2,transition:`all ${DS.fast}`}}>Todos</button>
+          {mesesFin.slice(0,12).map(ym=>{
+            const on=fMes===ym;
+            const itens=data.payables.filter(p=>(p.due||"").slice(0,7)===ym);
+            const aberto=itens.filter(p=>p.status!=="Pago").length;
+            return (
+              <button key={ym} onClick={()=>setFMes(ym)}
+                style={{height:34,padding:"0 14px",borderRadius:DS.r8,cursor:"pointer",fontFamily:"inherit",
+                  fontSize:13,fontWeight:on?600:500,display:"inline-flex",alignItems:"center",gap:6,
+                  border:`1px solid ${on?DS.ink:DS.bd}`,background:on?DS.ink:"transparent",
+                  color:on?"#fff":DS.i2,transition:`all ${DS.fast}`}}>
+                {nomeMesFin(ym)}
+                {aberto>0&&<span style={{fontSize:11,fontWeight:700,padding:"1px 6px",borderRadius:10,
+                  background:on?"rgba(255,255,255,.2)":DS.surEl,color:on?"#fff":DS.i3}}>{aberto}</span>}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
       {/* Summary row */}
       <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10,marginBottom:24}}>
         {[
@@ -2758,21 +2831,34 @@ function PgPurchases({ data, setData, reload, tenantId }) {
           }
         }
       }
-      if(isNew){
-        // 3. Gerar contas a pagar
-        if(form.pay!=="À Vista"){
-          const payArr=[];
-          for(let i=0;i<nParcelas;i++){
-            const dueD=(form.parcelaDates&&form.parcelaDates[i])?form.parcelaDates[i]:(form.due?addD(form.due,i*30):addD(TODAY,(i+1)*30));
-            payArr.push({desc:form.item+" — Parcela "+(i+1)+"/"+nParcelas,cat:catLabel,sup:form.sup,phone:form.phone,amt:Math.round(parcelaVal*100)/100,due:dueD,paid:null,status:"Pendente",prodId:null,purchaseId:savedPurch.id,notes:nParcelas+"x de "+R(parcelaVal)});
-          }
-          const savedPays=await sb.insertPayBatch(payArr,tenantId);
-          setData(d=>({...d,payables:[...d.payables,...savedPays]}));
+      // 3. Lançar no financeiro — toda compra vira conta, à vista ou parcelada
+      if(!isNew){
+        // ao editar, refaz os lançamentos desta compra
+        await sb.deletePaysByPurchase(savedPurch.id);
+        setData(d=>({...d,payables:d.payables.filter(p=>p.purchaseId!==savedPurch.id)}));
+      }
+      const payArr=[];
+      if(form.pay==="À Vista"){
+        payArr.push({desc:form.item+" — compra à vista",cat:catLabel,sup:form.sup,phone:form.phone,
+          amt:Math.round(total*100)/100,due:form.date||TODAY,paid:form.date||TODAY,status:"Pago",
+          prodId:null,purchaseId:savedPurch.id,
+          notes:form.qty+" "+(form.type==="rm"?"m":"un")+" × "+R(parseFloat(form.price)||0)});
+      } else {
+        for(let i=0;i<nParcelas;i++){
+          const dueD=(form.parcelaDates&&form.parcelaDates[i])?form.parcelaDates[i]
+            :(form.due?addD(form.due,i*30):addD(TODAY,(i+1)*30));
+          payArr.push({desc:form.item+" — Parcela "+(i+1)+"/"+nParcelas,cat:catLabel,sup:form.sup,
+            phone:form.phone,amt:Math.round(parcelaVal*100)/100,due:dueD,paid:null,status:"Pendente",
+            prodId:null,purchaseId:savedPurch.id,notes:nParcelas+"x de "+R(parcelaVal)});
         }
+      }
+      if(payArr.length){
+        const savedPays=await sb.insertPayBatch(payArr,tenantId);
+        setData(d=>({...d,payables:[...d.payables,...savedPays]}));
       }
       setData(d=>({...d,purchases:isNew?[...d.purchases,savedPurch]:d.purchases.map(p=>p.id===savedPurch.id?savedPurch:p)}));
       setShowF(false);setEd(null);setForm(EF);
-      showToast(isNew?"Compra registrada com sucesso.":"Compra atualizada.","ok");
+      showToast(isNew?"Compra registrada e lançada no financeiro.":"Compra atualizada.","ok");
     } catch(e){ showToast("Erro ao salvar: "+e.message,"err"); }
   };
 
@@ -3710,210 +3796,286 @@ function PgFaturamento({ data, setData, tenantId }){
   const serie = [...meses].reverse().slice(-12);
   const maxSerie = Math.max(...serie.map(m=>somaCanais(m)),1);
 
-  const Kpi = ({label,valor,variacao,inverso,destaque,sub}) => (
-    <Card p={16}>
-      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,marginBottom:10}}>
-        <Lbl ch={label}/>
+  /* KPI — número como protagonista, variação discreta ao lado */
+  const Kpi = ({label,valor,variacao,inverso,destaque,sub,acento}) => (
+    <div style={{background:destaque?DS.ink:DS.sur,borderRadius:DS.r14,
+      border:`1px solid ${destaque?DS.ink:DS.bd}`,padding:"18px 20px",
+      boxShadow:destaque?DS.e2:DS.e1,transition:`box-shadow ${DS.base}`}}>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,marginBottom:14}}>
+        <span style={{...tsCss(TS.micro),textTransform:"uppercase",
+          color:destaque?"rgba(255,255,255,.62)":DS.i3}}>{label}</span>
         <Variacao dado={variacao} inverso={inverso} titulo={tipAnt}/>
       </div>
-      <div style={{fontSize:destaque?26:22,fontWeight:780,letterSpacing:"-.6px",
-        color:destaque?(liq>=0?DS.ok:DS.err):DS.i1,fontVariantNumeric:"tabular-nums",lineHeight:1.1}}>
-        {valor}
-      </div>
-      {sub&&<div style={{fontSize:12,color:DS.i3,marginTop:4}}>{sub}</div>}
-    </Card>
+      <div className="tnum" style={{...tsCss(destaque?TS.h2:TS.h3),
+        color:destaque?"#fff":(acento||DS.i1),fontFamily:FONT_DISPLAY}}>{valor}</div>
+      {sub&&<div style={{...tsCss(TS.caption),marginTop:6,
+        color:destaque?"rgba(255,255,255,.55)":DS.i3}}>{sub}</div>}
+    </div>
   );
 
   return (
     <div>
-      <SH title="Faturamento" sub={atual?mesLabel(atual.month):"Nenhum mês cadastrado"}
-        action={<Btn onClick={abrirNovo}>+ Novo mês</Btn>}/>
+      {/* Cabeçalho */}
+      <div style={{display:"flex",alignItems:"flex-end",justifyContent:"space-between",
+        gap:16,flexWrap:"wrap",marginBottom:isSmall?20:28}}>
+        <div>
+          <div style={{...tsCss(TS.micro),textTransform:"uppercase",color:DS.i3,marginBottom:6}}>
+            Faturamento
+          </div>
+          <h1 style={{fontFamily:FONT_DISPLAY,...tsCss(TS.h1),color:DS.i1,margin:0}}>
+            {atual?mesLabel(atual.month):"Nenhum mês cadastrado"}
+          </h1>
+          {anterior&&(
+            <div style={{...tsCss(TS.caption),color:DS.i3,marginTop:6}}>
+              Comparado com {mesLabel(anterior.month)}
+            </div>
+          )}
+        </div>
+        <Btn onClick={abrirNovo}>+ Novo mês</Btn>
+      </div>
 
       {meses.length===0 ? (
-        <Card p={0}>
-          <div style={{textAlign:"center",padding:"64px 24px"}}>
-            <div style={{fontSize:16,fontWeight:700,color:DS.i1,marginBottom:8}}>Comece pelo primeiro mês</div>
-            <div style={{fontSize:13.5,color:DS.i3,maxWidth:400,margin:"0 auto 20px",lineHeight:1.6}}>
-              Cadastre o faturamento e o lucro de cada marketplace, mais os gastos com anúncios e impostos.
-              A partir do segundo mês o sistema mostra a variação automaticamente.
-            </div>
-            <Btn onClick={abrirNovo}>Cadastrar mês</Btn>
+        <div style={{background:DS.sur,borderRadius:DS.r14,border:`1px solid ${DS.bd}`,
+          padding:"72px 24px",textAlign:"center"}}>
+          <div style={{width:48,height:48,borderRadius:DS.r12,background:DS.surEl,
+            display:"inline-flex",alignItems:"center",justifyContent:"center",marginBottom:18}}>
+            <svg width="22" height="22" viewBox="0 0 16 16" fill="none" stroke={DS.i3}
+              strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M2 12l3.5-4.5 3 3L13 4.5M13 4.5H9.5M13 4.5V8"/></svg>
           </div>
-        </Card>
+          <div style={{...tsCss(TS.h4),color:DS.i1,marginBottom:8}}>Comece pelo primeiro mês</div>
+          <p style={{...tsCss(TS.body),color:DS.i3,maxWidth:390,margin:"0 auto 22px"}}>
+            Registre o faturamento e o lucro de cada marketplace, mais os gastos com anúncios
+            e impostos. A partir do segundo mês a variação aparece sozinha.
+          </p>
+          <Btn onClick={abrirNovo}>Cadastrar mês</Btn>
+        </div>
       ) : (
         <>
-          {/* seletor de mês */}
-          <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center",marginBottom:22,
-            paddingBottom:16,borderBottom:`1px solid ${DS.bd}`}}>
-            {meses.slice(0,14).map(m=>{
-              const on = atual?.month===m.month;
+          {/* Linha do tempo dos meses */}
+          <div style={{display:"flex",gap:4,overflowX:"auto",paddingBottom:14,marginBottom:24,
+            borderBottom:`1px solid ${DS.bd}`,scrollbarWidth:"none"}}>
+            {[...meses].reverse().map(m=>{
+              const on=atual?.month===m.month;
               return (
                 <button key={m.id} onClick={()=>setSelMes(m.month)}
-                  style={{height:34,padding:"0 13px",borderRadius:DS.r8,cursor:"pointer",fontFamily:"inherit",
-                    fontSize:13,fontWeight:on?600:500,whiteSpace:"nowrap",
-                    border:`1px solid ${on?DS.ink:DS.bd}`,background:on?DS.ink:"transparent",
-                    color:on?"#fff":DS.i2,transition:`all ${DS.fast}`}}>
+                  style={{padding:"7px 14px",borderRadius:DS.r8,cursor:"pointer",border:"none",
+                    background:on?DS.ink:"transparent",color:on?"#fff":DS.i3,
+                    fontFamily:"inherit",...tsCss(TS.caption),fontWeight:on?600:500,
+                    whiteSpace:"nowrap",transition:`all ${DS.fast}`}}
+                  onMouseEnter={e=>{if(!on)e.currentTarget.style.background=DS.surEl}}
+                  onMouseLeave={e=>{if(!on)e.currentTarget.style.background="transparent"}}>
                   {mesCurto(m.month)}
                 </button>
               );
             })}
           </div>
 
-          {/* KPIs */}
+          {/* Indicadores */}
           <div style={{display:"grid",gridTemplateColumns:isSmall?"1fr 1fr":"repeat(4,1fr)",
-            gap:10,marginBottom:10}}>
+            gap:12,marginBottom:12}}>
             <Kpi label="Faturamento" valor={R(fat)} variacao={vFat}
-              sub={anterior?mesCurto(anterior.month)+": "+R(somaCanais(anterior)):null}/>
+              sub={anterior?mesCurto(anterior.month)+" · "+R(somaCanais(anterior)):"primeiro mês"}/>
             <Kpi label="Lucro bruto" valor={R(luc)} variacao={vLuc}
               sub={fat>0?((luc/fat)*100).toFixed(1).replace(".",",")+"% do faturamento":null}/>
-            <Kpi label="Gastos" valor={R(gas)} variacao={vGas} inverso
-              sub={anterior?mesCurto(anterior.month)+": "+R(somaGastos(anterior)):null}/>
+            <Kpi label="Gastos" valor={R(gas)} variacao={vGas} inverso acento={DS.err}
+              sub={fat>0?((gas/fat)*100).toFixed(1).replace(".",",")+"% do faturamento":null}/>
             <Kpi label="Lucro líquido" valor={R(liq)} variacao={vLiq} destaque
-              sub={"margem "+margem.toFixed(1).replace(".",",")+"%"}/>
+              sub={"margem de "+margem.toFixed(1).replace(".",",")+"%"}/>
           </div>
 
-          {/* meta */}
+          {/* Meta */}
           {meta>0&&(
-            <Card p={16} style={{marginBottom:26}}>
+            <div style={{background:DS.sur,borderRadius:DS.r14,border:`1px solid ${DS.bd}`,
+              padding:"18px 20px",marginBottom:28,boxShadow:DS.e1}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",
-                gap:12,marginBottom:10,flexWrap:"wrap"}}>
-                <Lbl ch="Meta do mês"/>
-                <div style={{fontSize:13,color:DS.i2,fontVariantNumeric:"tabular-nums"}}>
-                  <strong style={{color:fat>=meta?DS.ok:DS.i1,fontSize:15}}>{R(fat)}</strong>
-                  <span style={{color:DS.i3}}> de {R(meta)}</span>
-                  <strong style={{marginLeft:8,color:fat>=meta?DS.ok:DS.warn}}>
+                gap:12,marginBottom:12,flexWrap:"wrap"}}>
+                <span style={{...tsCss(TS.micro),textTransform:"uppercase",color:DS.i3}}>Meta do mês</span>
+                <div style={{display:"flex",alignItems:"baseline",gap:8}}>
+                  <span className="tnum" style={{...tsCss(TS.h4),
+                    color:fat>=meta?DS.ok:DS.i1,fontFamily:FONT_DISPLAY}}>
                     {((fat/meta)*100).toFixed(0)}%
-                  </strong>
+                  </span>
+                  <span className="tnum" style={{...tsCss(TS.caption),color:DS.i3}}>
+                    {R(fat)} de {R(meta)}
+                  </span>
                 </div>
               </div>
-              <div style={{height:9,borderRadius:5,background:DS.surEl,overflow:"hidden"}}>
+              <div style={{height:6,borderRadius:3,background:DS.surEl,overflow:"hidden"}}>
                 <div style={{width:Math.min(100,(fat/meta)*100)+"%",height:"100%",
-                  background:fat>=meta?DS.ok:DS.ink,transition:`width ${DS.slow}`}}/>
+                  background:fat>=meta?DS.ok:DS.ink,borderRadius:3,
+                  transition:`width ${DS.slow}`}}/>
               </div>
-              {fat<meta&&<div style={{fontSize:12,color:DS.i3,marginTop:8}}>
-                Faltam {R(meta-fat)} para bater a meta
-              </div>}
-            </Card>
+              <div style={{...tsCss(TS.caption),color:fat>=meta?DS.ok:DS.i3,marginTop:10}}>
+                {fat>=meta
+                  ? "Meta batida com "+R(fat-meta)+" de sobra"
+                  : "Faltam "+R(meta-fat)+" para bater a meta"}
+              </div>
+            </div>
           )}
 
-          {/* canais */}
-          <div style={{display:"grid",gridTemplateColumns:isSmall?"1fr":"1fr 1fr",gap:24,marginBottom:26}}>
-            <Card p={0}>
-              <div style={{padding:"14px 18px",borderBottom:`1px solid ${DS.bd}`,
-                display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                <div style={{fontSize:14,fontWeight:700}}>Por marketplace</div>
-                <div style={{fontSize:12,color:DS.i3}}>{(atual?.channels||[]).length} canais</div>
-              </div>
-              {(atual?.channels||[]).length===0
-                ? <div style={{padding:"28px 18px",textAlign:"center",fontSize:13,color:DS.i3}}>Nenhum canal lançado</div>
-                : <div>
-                    {[...(atual.channels||[])].sort((a,b)=>(b.revenue||0)-(a.revenue||0)).map((c,i,arr)=>{
-                      const antC=(anterior?.channels||[]).find(x=>x.name===c.name);
-                      const vc=antC?varPct(Number(c.revenue)||0,Number(antC.revenue)||0):null;
-                      const share=fat>0?((Number(c.revenue)||0)/fat)*100:0;
-                      const cc=corCanal(c.name);
-                      return (
-                        <div key={c.name} style={{padding:"13px 18px",
-                          borderBottom:i<arr.length-1?`1px solid ${DS.bd}`:"none"}}>
-                          <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:8}}>
-                            <span style={{width:10,height:10,borderRadius:3,background:cc.cor,
-                              border:`1px solid ${DS.bd}`,flexShrink:0}}/>
-                            <span style={{flex:1,fontSize:13.5,fontWeight:600,color:DS.i1}}>{c.name}</span>
-                            <Variacao dado={vc} titulo={tipAnt}/>
-                            <span style={{fontSize:14,fontWeight:700,fontVariantNumeric:"tabular-nums",
-                              minWidth:96,textAlign:"right"}}>{R(c.revenue)}</span>
-                          </div>
-                          <div style={{display:"flex",alignItems:"center",gap:10}}>
-                            <div style={{flex:1,height:5,borderRadius:3,background:DS.surEl,overflow:"hidden"}}>
-                              <div style={{width:share+"%",height:"100%",background:cc.cor,
-                                transition:`width ${DS.slow}`}}/>
-                            </div>
-                            <span style={{fontSize:11,color:DS.i3,fontVariantNumeric:"tabular-nums",minWidth:38,
-                              textAlign:"right"}}>{share.toFixed(0)}%</span>
-                            {Number(c.profit)>0&&<span style={{fontSize:11,color:DS.ok,fontWeight:600,
-                              fontVariantNumeric:"tabular-nums"}}>lucro {R(c.profit)}</span>}
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>}
-            </Card>
-
-            <Card p={0}>
-              <div style={{padding:"14px 18px",borderBottom:`1px solid ${DS.bd}`,
-                display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                <div style={{fontSize:14,fontWeight:700}}>Gastos do mês</div>
-                <div style={{fontSize:14,fontWeight:700,color:DS.err,
-                  fontVariantNumeric:"tabular-nums"}}>{R(gas)}</div>
-              </div>
-              {(atual?.expenses||[]).length===0
-                ? <div style={{padding:"28px 18px",textAlign:"center",fontSize:13,color:DS.i3}}>Nenhum gasto lançado</div>
-                : <div>
-                    {[...(atual.expenses||[])].sort((a,b)=>(b.amount||0)-(a.amount||0)).map((e,i,arr)=>{
-                      const antE=(anterior?.expenses||[]).find(x=>x.name===e.name);
-                      const ve=antE?varPct(Number(e.amount)||0,Number(antE.amount)||0):null;
-                      return (
-                        <div key={e.name} style={{display:"flex",alignItems:"center",gap:10,
-                          padding:"12px 18px",borderBottom:i<arr.length-1?`1px solid ${DS.bd}`:"none"}}>
-                          <span style={{flex:1,fontSize:13,color:DS.i2}}>{e.name}</span>
-                          <Variacao dado={ve} inverso titulo={tipAnt}/>
-                          <span style={{fontSize:13.5,fontWeight:600,fontVariantNumeric:"tabular-nums",
-                            minWidth:88,textAlign:"right"}}>{R(e.amount)}</span>
-                        </div>
-                      );
-                    })}
-                  </div>}
-            </Card>
-          </div>
-
-          {/* evolução */}
+          {/* Evolução */}
           {serie.length>1&&(
-            <Card p={0} style={{marginBottom:26}}>
-              <div style={{padding:"14px 18px",borderBottom:`1px solid ${DS.bd}`,fontSize:14,fontWeight:700}}>
-                Evolução do faturamento
+            <div style={{background:DS.sur,borderRadius:DS.r14,border:`1px solid ${DS.bd}`,
+              marginBottom:28,boxShadow:DS.e1,overflow:"hidden"}}>
+              <div style={{padding:"18px 20px 0",display:"flex",justifyContent:"space-between",
+                alignItems:"flex-start",gap:16,flexWrap:"wrap"}}>
+                <div>
+                  <div style={{...tsCss(TS.h4),color:DS.i1,fontFamily:FONT_DISPLAY}}>Evolução</div>
+                  <div style={{...tsCss(TS.caption),color:DS.i3,marginTop:3}}>
+                    Últimos {serie.length} meses
+                  </div>
+                </div>
+                <div style={{display:"flex",gap:16}}>
+                  <span style={{display:"flex",alignItems:"center",gap:6,...tsCss(TS.caption),color:DS.i3}}>
+                    <span style={{width:8,height:8,borderRadius:2,background:DS.bdS}}/>Faturamento</span>
+                  <span style={{display:"flex",alignItems:"center",gap:6,...tsCss(TS.caption),color:DS.i3}}>
+                    <span style={{width:8,height:8,borderRadius:2,background:DS.ok}}/>Líquido</span>
+                </div>
               </div>
-              <div style={{padding:"22px 18px",display:"flex",alignItems:"flex-end",gap:isSmall?5:9,
-                height:190,overflowX:"auto"}}>
+              <div style={{padding:"24px 20px 20px",display:"flex",alignItems:"flex-end",
+                gap:isSmall?4:8,height:210,overflowX:"auto",scrollbarWidth:"none"}}>
                 {serie.map(m=>{
-                  const v=somaCanais(m);
-                  const h=Math.max(3,(v/maxSerie)*130);
+                  const v=somaCanais(m), l=liquido(m);
+                  const h=Math.max(4,(v/maxSerie)*140);
+                  const hl=v>0?Math.max(0,(l/maxSerie)*140):0;
                   const on=atual?.month===m.month;
-                  const l=liquido(m);
-                  const hl=v>0?Math.max(0,(l/maxSerie)*130):0;
                   return (
                     <button key={m.id} onClick={()=>setSelMes(m.month)}
-                      title={mesLabel(m.month)+" · "+R(v)+" · líquido "+R(l)}
-                      style={{flex:1,minWidth:isSmall?30:38,display:"flex",flexDirection:"column",
-                        alignItems:"center",gap:6,background:"none",border:"none",cursor:"pointer",padding:0}}>
-                      <span style={{fontSize:10,color:on?DS.i1:DS.i3,fontWeight:on?700:500,
-                        fontVariantNumeric:"tabular-nums",whiteSpace:"nowrap"}}>
+                      title={mesLabel(m.month)+"\\nFaturamento "+R(v)+"\\nLíquido "+R(l)}
+                      style={{flex:1,minWidth:isSmall?28:36,display:"flex",flexDirection:"column",
+                        alignItems:"center",gap:8,background:"none",border:"none",cursor:"pointer",
+                        padding:0,opacity:on?1:.72,transition:`opacity ${DS.fast}`}}
+                      onMouseEnter={e=>e.currentTarget.style.opacity=1}
+                      onMouseLeave={e=>e.currentTarget.style.opacity=on?1:.72}>
+                      <span className="tnum" style={{...tsCss(TS.micro),letterSpacing:"0",
+                        color:on?DS.i1:DS.i4,fontWeight:on?700:500,whiteSpace:"nowrap"}}>
                         {v>=1000?(v/1000).toFixed(0)+"k":v.toFixed(0)}
                       </span>
-                      <span style={{width:"100%",height:h,borderRadius:"5px 5px 0 0",position:"relative",
-                        background:on?DS.ink:DS.bdM,transition:`background ${DS.fast}`}}>
-                        {hl>0&&<span style={{position:"absolute",bottom:0,left:0,right:0,height:Math.min(h,hl),
-                          background:on?DS.ok:DS.okBd,borderRadius:hl>=h?"5px 5px 0 0":0}}/>}
+                      <span style={{width:"100%",height:h,borderRadius:"4px 4px 0 0",
+                        position:"relative",background:on?DS.ink:DS.bdM,
+                        transition:`background ${DS.fast}, height ${DS.slow}`}}>
+                        {hl>0&&<span style={{position:"absolute",bottom:0,left:0,right:0,
+                          height:Math.min(h,hl),background:DS.ok,
+                          borderRadius:hl>=h?"4px 4px 0 0":0,opacity:on?1:.6}}/>}
                       </span>
-                      <span style={{fontSize:10,color:on?DS.i1:DS.i3,fontWeight:on?700:500,
-                        whiteSpace:"nowrap"}}>{mesCurto(m.month)}</span>
+                      <span style={{...tsCss(TS.micro),letterSpacing:"0",
+                        color:on?DS.i1:DS.i4,fontWeight:on?700:500,whiteSpace:"nowrap"}}>
+                        {mesCurto(m.month)}
+                      </span>
                     </button>
                   );
                 })}
               </div>
-              <div style={{padding:"0 18px 16px",display:"flex",gap:16,fontSize:11,color:DS.i3}}>
-                <span style={{display:"flex",alignItems:"center",gap:5}}>
-                  <span style={{width:9,height:9,borderRadius:3,background:DS.ink}}/>Faturamento</span>
-                <span style={{display:"flex",alignItems:"center",gap:5}}>
-                  <span style={{width:9,height:9,borderRadius:3,background:DS.ok}}/>Lucro líquido</span>
-              </div>
-            </Card>
+            </div>
           )}
 
+          {/* Canais e gastos */}
+          <div style={{display:"grid",gridTemplateColumns:isSmall?"1fr":"1.35fr 1fr",
+            gap:16,marginBottom:28}}>
+
+            <div style={{background:DS.sur,borderRadius:DS.r14,border:`1px solid ${DS.bd}`,
+              boxShadow:DS.e1,overflow:"hidden"}}>
+              <div style={{padding:"18px 20px",borderBottom:`1px solid ${DS.bd}`,
+                display:"flex",justifyContent:"space-between",alignItems:"baseline"}}>
+                <div style={{...tsCss(TS.h4),color:DS.i1,fontFamily:FONT_DISPLAY}}>Marketplaces</div>
+                <div style={{...tsCss(TS.caption),color:DS.i3}}>
+                  {(atual?.channels||[]).length} canais
+                </div>
+              </div>
+              {(atual?.channels||[]).length===0
+                ? <div style={{padding:"36px 20px",textAlign:"center",...tsCss(TS.body),color:DS.i3}}>
+                    Nenhum canal lançado neste mês
+                  </div>
+                : <div style={{padding:"6px 0"}}>
+                    {[...(atual.channels||[])].sort((a,b)=>(b.revenue||0)-(a.revenue||0))
+                      .map((c,i,arr)=>{
+                      const antC=(anterior?.channels||[]).find(x=>x.name===c.name);
+                      const vc=antC?varPct(Number(c.revenue)||0,Number(antC.revenue)||0):null;
+                      const share=fat>0?((Number(c.revenue)||0)/fat)*100:0;
+                      const cc=corCanal(c.name);
+                      const mg=Number(c.revenue)>0&&Number(c.profit)>0
+                        ? (Number(c.profit)/Number(c.revenue))*100 : null;
+                      return (
+                        <div key={c.name} style={{padding:"14px 20px",
+                          borderBottom:i<arr.length-1?`1px solid ${DS.bd}`:"none"}}>
+                          <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:9}}>
+                            <span style={{width:9,height:9,borderRadius:3,background:cc.cor,
+                              border:`1px solid rgba(0,0,0,.12)`,flexShrink:0}}/>
+                            <span style={{flex:1,...tsCss(TS.bodyMd),color:DS.i1}}>{c.name}</span>
+                            <Variacao dado={vc} titulo={tipAnt}/>
+                            <span className="tnum" style={{...tsCss(TS.bodyMd),fontWeight:650,
+                              color:DS.i1,minWidth:100,textAlign:"right"}}>{R(c.revenue)}</span>
+                          </div>
+                          <div style={{display:"flex",alignItems:"center",gap:10}}>
+                            <div style={{flex:1,height:4,borderRadius:2,background:DS.surEl,
+                              overflow:"hidden"}}>
+                              <div style={{width:share+"%",height:"100%",background:cc.cor,
+                                borderRadius:2,transition:`width ${DS.slow}`}}/>
+                            </div>
+                            <span className="tnum" style={{...tsCss(TS.micro),letterSpacing:"0",
+                              color:DS.i3,minWidth:34,textAlign:"right"}}>
+                              {share.toFixed(0)}%
+                            </span>
+                            {mg!=null&&(
+                              <span className="tnum" style={{...tsCss(TS.micro),letterSpacing:"0",
+                                color:DS.ok,minWidth:88,textAlign:"right"}}>
+                                {R(c.profit)} · {mg.toFixed(0)}%
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>}
+            </div>
+
+            <div style={{background:DS.sur,borderRadius:DS.r14,border:`1px solid ${DS.bd}`,
+              boxShadow:DS.e1,overflow:"hidden"}}>
+              <div style={{padding:"18px 20px",borderBottom:`1px solid ${DS.bd}`,
+                display:"flex",justifyContent:"space-between",alignItems:"baseline"}}>
+                <div style={{...tsCss(TS.h4),color:DS.i1,fontFamily:FONT_DISPLAY}}>Gastos</div>
+                <div className="tnum" style={{...tsCss(TS.bodyMd),fontWeight:650,color:DS.err}}>
+                  {R(gas)}
+                </div>
+              </div>
+              {(atual?.expenses||[]).length===0
+                ? <div style={{padding:"36px 20px",textAlign:"center",...tsCss(TS.body),color:DS.i3}}>
+                    Nenhum gasto lançado
+                  </div>
+                : <div style={{padding:"6px 0"}}>
+                    {[...(atual.expenses||[])].sort((a,b)=>(b.amount||0)-(a.amount||0))
+                      .map((e,i,arr)=>{
+                      const antE=(anterior?.expenses||[]).find(x=>x.name===e.name);
+                      const ve=antE?varPct(Number(e.amount)||0,Number(antE.amount)||0):null;
+                      const sh=gas>0?((Number(e.amount)||0)/gas)*100:0;
+                      return (
+                        <div key={e.name} style={{padding:"12px 20px",
+                          borderBottom:i<arr.length-1?`1px solid ${DS.bd}`:"none"}}>
+                          <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:7}}>
+                            <span style={{flex:1,...tsCss(TS.body),color:DS.i2}}>{e.name}</span>
+                            <Variacao dado={ve} inverso titulo={tipAnt}/>
+                            <span className="tnum" style={{...tsCss(TS.bodyMd),color:DS.i1,
+                              minWidth:88,textAlign:"right"}}>{R(e.amount)}</span>
+                          </div>
+                          <div style={{height:3,borderRadius:2,background:DS.surEl,overflow:"hidden"}}>
+                            <div style={{width:sh+"%",height:"100%",background:DS.err,opacity:.45,
+                              borderRadius:2}}/>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>}
+            </div>
+          </div>
+
           {atual?.notes&&(
-            <Card p={16} style={{marginBottom:20}}>
-              <Lbl ch="Observações" style={{marginBottom:6}}/>
-              <div style={{fontSize:13.5,color:DS.i2,lineHeight:1.6,whiteSpace:"pre-wrap"}}>{atual.notes}</div>
-            </Card>
+            <div style={{background:DS.surEl,borderRadius:DS.r12,padding:"16px 18px",marginBottom:24}}>
+              <div style={{...tsCss(TS.micro),textTransform:"uppercase",color:DS.i3,marginBottom:7}}>
+                Observações
+              </div>
+              <div style={{...tsCss(TS.body),color:DS.i2,whiteSpace:"pre-wrap"}}>{atual.notes}</div>
+            </div>
           )}
 
           <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
@@ -4088,7 +4250,7 @@ export default function App() {
   const [filter,setFilter]     = useState(null);
   const [sideOpen,setSideOpen] = useState(true);
   const [mMenu,setMMenu]       = useState(false);
-  const [openGroup,setOpenGroup] = useState(true);
+  const [openGroup,setOpenGroup] = useState(false);
   const [currentUser,setCurrentUser] = useState(null);
   const [tenantId,setTenantId] = useState(null);
   const [loading,setLoading]   = useState(true);
@@ -4129,7 +4291,6 @@ export default function App() {
   const alerts = getAlerts(data);
   const badgeFor = id => {
     if(id==="financial"||id==="agenda") return data.payables.filter(p=>isOD(p.due)&&p.status!=="Pago").length;
-    if(id==="stock"||id==="fabrics"||id==="trims") return [...data.rawMaterials,...data.trims].filter(i=>i.stock<=i.min).length;
     return 0;
   };
 
