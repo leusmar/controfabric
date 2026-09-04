@@ -3705,6 +3705,146 @@ function Variacao({dado,inverso,titulo}){
   );
 }
 
+/* ─────────────────────────────────────────────────────────────────
+   Gráfico de tendência — área + linha
+   Segue as regras de Charts & Data da skill:
+   linhas de grade discretas, eixo Y rotulado, tooltip no hover e no
+   teclado, pontos navegáveis por Tab, resumo em texto para leitores
+   de tela e tabela alternativa.
+   ───────────────────────────────────────────────────────────────── */
+function TrendChart({ serie, atualMonth, onPick, isSmall }){
+  const [hover,setHover] = useState(null);
+  const H = isSmall?150:190, PAD_L = isSmall?46:58, PAD_R = 14, PAD_T = 16, PAD_B = 30;
+  const [w,setW] = useState(760);
+  const boxRef = useRef(null);
+  useEffect(()=>{
+    if(!boxRef.current) return;
+    const ro=new ResizeObserver(e=>setW(e[0].contentRect.width));
+    ro.observe(boxRef.current); return ()=>ro.disconnect();
+  },[]);
+  if(!serie.length) return null;
+
+  const vals  = serie.map(m=>somaCanais(m));
+  const nets  = serie.map(m=>liquido(m));
+  const maxV  = Math.max(...vals,...nets,1);
+  /* topo arredondado para uma escala legível */
+  const step  = Math.pow(10,Math.floor(Math.log10(maxV)))/2;
+  const top   = Math.ceil(maxV/step)*step;
+  const innerW = Math.max(120,w-PAD_L-PAD_R), innerH = H-PAD_T-PAD_B;
+  const x = i => PAD_L + (serie.length===1?innerW/2:(i/(serie.length-1))*innerW);
+  const y = v => PAD_T + innerH - (v/top)*innerH;
+
+  const linha = arr => arr.map((v,i)=>`${i?"L":"M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+  const area  = arr => `${linha(arr)} L${x(arr.length-1).toFixed(1)},${(PAD_T+innerH).toFixed(1)} L${x(0).toFixed(1)},${(PAD_T+innerH).toFixed(1)} Z`;
+
+  const ticks = [0,.25,.5,.75,1].map(f=>top*f);
+  const fmtEixo = v => v>=1000000?(v/1000000).toFixed(1).replace(".",",")+"M"
+                     : v>=1000?Math.round(v/1000)+"k" : String(Math.round(v));
+
+  const ptAtivo = hover!=null?hover:serie.findIndex(m=>m.month===atualMonth);
+  const mAtivo  = ptAtivo>=0?serie[ptAtivo]:null;
+
+  /* resumo textual para leitores de tela */
+  const primeiro=vals[0], ultimo=vals[vals.length-1];
+  const variacao = primeiro>0?((ultimo-primeiro)/primeiro)*100:0;
+  const resumo = `Faturamento de ${mesLabel(serie[0].month)} a ${mesLabel(serie[serie.length-1].month)}: `+
+    `de ${R(primeiro)} para ${R(ultimo)}, variação de ${variacao.toFixed(0)}%.`;
+
+  return (
+    <div ref={boxRef} style={{position:"relative"}}>
+      <p style={{position:"absolute",width:1,height:1,overflow:"hidden",clip:"rect(0 0 0 0)"}}>{resumo}</p>
+      <svg width="100%" height={H} viewBox={`0 0 ${w} ${H}`} role="img"
+        aria-label={resumo} style={{display:"block",overflow:"visible"}}>
+        <defs>
+          <linearGradient id="fadeFat" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%"   stopColor={DS.ink} stopOpacity=".13"/>
+            <stop offset="100%" stopColor={DS.ink} stopOpacity="0"/>
+          </linearGradient>
+        </defs>
+
+        {/* grade discreta e eixo Y */}
+        {ticks.map((t,i)=>(
+          <g key={i}>
+            <line x1={PAD_L} x2={w-PAD_R} y1={y(t)} y2={y(t)}
+              stroke={DS.bd} strokeWidth="1" shapeRendering="crispEdges"/>
+            <text x={PAD_L-10} y={y(t)+4} textAnchor="end"
+              style={{fontSize:11,fill:DS.i4,fontVariantNumeric:"tabular-nums"}}>{fmtEixo(t)}</text>
+          </g>
+        ))}
+
+        {/* faturamento */}
+        <path d={area(vals)}  fill="url(#fadeFat)"/>
+        <path d={linha(vals)} fill="none" stroke={DS.ink} strokeWidth="2"
+          strokeLinejoin="round" strokeLinecap="round"/>
+        {/* lucro líquido — tracejado, distinguível sem depender da cor */}
+        <path d={linha(nets)} fill="none" stroke={DS.ok} strokeWidth="2"
+          strokeDasharray="5 4" strokeLinejoin="round" strokeLinecap="round"/>
+
+        {/* guia vertical do ponto ativo */}
+        {mAtivo&&ptAtivo>=0&&(
+          <line x1={x(ptAtivo)} x2={x(ptAtivo)} y1={PAD_T} y2={PAD_T+innerH}
+            stroke={DS.bdS} strokeWidth="1" strokeDasharray="3 3"/>
+        )}
+
+        {/* pontos — alvo de toque amplo e navegáveis por teclado */}
+        {serie.map((m,i)=>{
+          const on = i===ptAtivo;
+          return (
+            <g key={m.id}>
+              <circle cx={x(i)} cy={y(nets[i])} r={on?4:3} fill={DS.sur}
+                stroke={DS.ok} strokeWidth="2"/>
+              <circle cx={x(i)} cy={y(vals[i])} r={on?5:3.5} fill={on?DS.ink:DS.sur}
+                stroke={DS.ink} strokeWidth="2"/>
+              <circle cx={x(i)} cy={y(vals[i])} r={22} fill="transparent"
+                tabIndex={0} role="button"
+                aria-label={`${mesLabel(m.month)}: faturamento ${R(vals[i])}, líquido ${R(nets[i])}`}
+                onMouseEnter={()=>setHover(i)} onMouseLeave={()=>setHover(null)}
+                onFocus={()=>setHover(i)} onBlur={()=>setHover(null)}
+                onClick={()=>onPick(m.month)}
+                onKeyDown={e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();onPick(m.month);}}}
+                style={{cursor:"pointer",outline:"none"}}/>
+            </g>
+          );
+        })}
+
+        {/* eixo X */}
+        {serie.map((m,i)=>{
+          const pular = isSmall && serie.length>6 && i%2!==0;
+          if(pular) return null;
+          return (
+            <text key={m.id} x={x(i)} y={H-8} textAnchor="middle"
+              style={{fontSize:11,fill:i===ptAtivo?DS.i1:DS.i4,
+                fontWeight:i===ptAtivo?700:500}}>{mesCurto(m.month)}</text>
+          );
+        })}
+      </svg>
+
+      {/* tooltip */}
+      {mAtivo&&(
+        <div role="status" style={{position:"absolute",top:0,
+          left:Math.min(Math.max(x(ptAtivo)-88,0),Math.max(0,w-176)),
+          width:176,background:DS.ink,color:"#fff",borderRadius:DS.r10,
+          padding:"10px 12px",boxShadow:DS.e3,pointerEvents:"none",zIndex:3}}>
+          <div style={{fontSize:11,color:"rgba(255,255,255,.6)",fontWeight:600,
+            textTransform:"uppercase",letterSpacing:".05em",marginBottom:6}}>
+            {mesLabel(mAtivo.month)}
+          </div>
+          <div style={{display:"flex",alignItems:"center",gap:7,marginBottom:4}}>
+            <span style={{width:9,height:2.5,background:"#fff",borderRadius:2}}/>
+            <span style={{fontSize:11.5,color:"rgba(255,255,255,.7)",flex:1}}>Faturamento</span>
+            <span className="tnum" style={{fontSize:12.5,fontWeight:700}}>{R(vals[ptAtivo])}</span>
+          </div>
+          <div style={{display:"flex",alignItems:"center",gap:7}}>
+            <span style={{width:9,height:0,borderTop:`2.5px dashed ${DS.ok}`}}/>
+            <span style={{fontSize:11.5,color:"rgba(255,255,255,.7)",flex:1}}>Líquido</span>
+            <span className="tnum" style={{fontSize:12.5,fontWeight:700,color:"#6EE7B7"}}>{R(nets[ptAtivo])}</span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function PgFaturamento({ data, setData, tenantId }){
   const { isSmall } = useViewport();
   const meses = useMemo(()=>[...(data.revenue||[])].sort((a,b)=>b.month.localeCompare(a.month)),[data.revenue]);
@@ -3744,19 +3884,40 @@ function PgFaturamento({ data, setData, tenantId }){
   const abrirEdit = m => {
     setEd(m);
     setForm({
-      month:m.month, goal:m.goal?String(m.goal):"",
+      month:m.month, goal:m.goal?fmtNum(Number(m.goal)):"",
       channels:(m.channels||[]).map(c=>{
         const rev=Number(c.revenue)||0, pf=Number(c.profit)||0;
-        return {name:c.name,revenue:String(c.revenue??""),profit:String(c.profit??""),
-          pct: rev>0&&pf>0 ? (pf/rev*100).toFixed(2) : ""};
+        return {name:c.name,revenue:fmtNum(rev),profit:fmtNum(pf),
+          pct: rev>0&&pf>0 ? (pf/rev*100).toFixed(2).replace(".",",") : ""};
       }),
-      expenses:(m.expenses||[]).map(e=>({name:e.name,amount:String(e.amount??"")})),
+      expenses:(m.expenses||[]).map(e=>({name:e.name,amount:fmtNum(Number(e.amount)||0)})),
       notes:m.notes||"",
     });
     setShowF(true);
   };
 
-  const num = v => parseFloat(String(v).replace(/\./g,"").replace(",","."))||0;
+  /* Lê números em qualquer formato: 33692.83 · 1.500,50 · 110574 · 7,50
+     Decide se o ponto é decimal ou separador de milhar pelo contexto. */
+  const num = v => {
+    if(v==null||v==="") return 0;
+    let t=String(v).trim().replace(/[R$\s%]/g,"");
+    if(!t) return 0;
+    const pt=t.includes("."), vg=t.includes(",");
+    if(pt&&vg){
+      t = t.lastIndexOf(",")>t.lastIndexOf(".")
+        ? t.replace(/\./g,"").replace(",",".")   // 1.500,50
+        : t.replace(/,/g,"");                    // 1,500.50
+    } else if(vg){
+      t = t.replace(",",".");                    // 30,47
+    } else if(pt){
+      const p=t.split(".");
+      const milhar = p.length>2 || (p.length===2 && p[1].length===3 && p[0].length>0);
+      if(milhar) t = t.replace(/\./g,"");        // 1.000
+    }
+    return parseFloat(t)||0;
+  };
+  /* Formata para exibir no campo, com vírgula decimal */
+  const fmtNum = n => n===0||n==null?"":String(Math.round(n*100)/100).replace(".",",");
 
   const salvar = async () => {
     if(!form.month){ showToast("Escolha o mês.","err"); return; }
@@ -3798,13 +3959,13 @@ function PgFaturamento({ data, setData, tenantId }){
     if(modoLucro==="pct"&&(k==="pct"||k==="revenue")){
       const rev=num(k==="revenue"?v:c.revenue);
       const pc=parseFloat(String(k==="pct"?v:c.pct).replace(",","."))||0;
-      upd.profit = rev&&pc ? String(Math.round(rev*pc/100*100)/100) : "";
+      upd.profit = rev&&pc ? fmtNum(rev*pc/100) : "";
     }
     /* em modo R$, mostra a margem correspondente */
     if(modoLucro==="valor"&&(k==="profit"||k==="revenue")){
       const rev=num(k==="revenue"?v:c.revenue);
       const pf=num(k==="profit"?v:c.profit);
-      upd.pct = rev>0&&pf>0 ? (pf/rev*100).toFixed(2) : "";
+      upd.pct = rev>0&&pf>0 ? (pf/rev*100).toFixed(2).replace(".",",") : "";
     }
     return upd;
   })}));
@@ -3815,7 +3976,7 @@ function PgFaturamento({ data, setData, tenantId }){
     if(!pc){ showToast("Informe a margem em %.","err"); return; }
     setForm(p=>({...p,channels:p.channels.map(c=>{
       const rev=num(c.revenue);
-      return {...c,pct:String(pc),profit:rev?String(Math.round(rev*pc/100*100)/100):""};
+      return {...c,pct:String(pc).replace(".",","),profit:rev?fmtNum(rev*pc/100):""};
     })}));
     showToast("Margem de "+pc+"% aplicada a todos os canais.","ok");
   };
@@ -3829,70 +3990,62 @@ function PgFaturamento({ data, setData, tenantId }){
   const serie = [...meses].reverse().slice(-12);
   const maxSerie = Math.max(...serie.map(m=>somaCanais(m)),1);
 
-  /* KPI — número como protagonista, variação discreta ao lado */
-  const Kpi = ({label,valor,variacao,inverso,destaque,sub,acento}) => (
-    <div style={{background:destaque?DS.ink:DS.sur,borderRadius:DS.r14,
-      border:`1px solid ${destaque?DS.ink:DS.bd}`,padding:"18px 20px",
-      boxShadow:destaque?DS.e2:DS.e1,transition:`box-shadow ${DS.base}`}}>
-      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,marginBottom:14}}>
-        <span style={{...tsCss(TS.micro),textTransform:"uppercase",
-          color:destaque?"rgba(255,255,255,.62)":DS.i3}}>{label}</span>
+  /* Cartão de indicador */
+  const Kpi = ({label,valor,variacao,inverso,sub,acento}) => (
+    <div style={{background:DS.sur,borderRadius:DS.r12,border:`1px solid ${DS.bd}`,
+      padding:"16px 18px",boxShadow:DS.e1}}>
+      <div style={{...tsCss(TS.micro),textTransform:"uppercase",color:DS.i3,marginBottom:10}}>{label}</div>
+      <div style={{display:"flex",alignItems:"baseline",gap:9,flexWrap:"wrap"}}>
+        <span className="tnum" style={{...tsCss(TS.h3),color:acento||DS.i1,fontFamily:FONT_DISPLAY}}>{valor}</span>
         <Variacao dado={variacao} inverso={inverso} titulo={tipAnt}/>
       </div>
-      <div className="tnum" style={{...tsCss(destaque?TS.h2:TS.h3),
-        color:destaque?"#fff":(acento||DS.i1),fontFamily:FONT_DISPLAY}}>{valor}</div>
-      {sub&&<div style={{...tsCss(TS.caption),marginTop:6,
-        color:destaque?"rgba(255,255,255,.55)":DS.i3}}>{sub}</div>}
+      {sub&&<div style={{...tsCss(TS.caption),color:DS.i3,marginTop:6}}>{sub}</div>}
     </div>
   );
 
   return (
     <div>
-      {/* Cabeçalho */}
+      {/* ── Cabeçalho ── */}
       <div style={{display:"flex",alignItems:"flex-end",justifyContent:"space-between",
-        gap:16,flexWrap:"wrap",marginBottom:isSmall?20:28}}>
+        gap:16,flexWrap:"wrap",marginBottom:isSmall?20:26}}>
         <div>
-          <div style={{...tsCss(TS.micro),textTransform:"uppercase",color:DS.i3,marginBottom:6}}>
-            Faturamento
+          <div style={{...tsCss(TS.micro),textTransform:"uppercase",color:DS.i3,marginBottom:7}}>
+            Faturamento por marketplace
           </div>
           <h1 style={{fontFamily:FONT_DISPLAY,...tsCss(TS.h1),color:DS.i1,margin:0}}>
-            {atual?mesLabel(atual.month):"Nenhum mês cadastrado"}
+            {atual?mesLabel(atual.month):"Sem lançamentos"}
           </h1>
-          {anterior&&(
-            <div style={{...tsCss(TS.caption),color:DS.i3,marginTop:6}}>
-              Comparado com {mesLabel(anterior.month)}
-            </div>
-          )}
         </div>
         <Btn onClick={abrirNovo}>+ Novo mês</Btn>
       </div>
 
       {meses.length===0 ? (
         <div style={{background:DS.sur,borderRadius:DS.r14,border:`1px solid ${DS.bd}`,
-          padding:"72px 24px",textAlign:"center"}}>
+          padding:"76px 24px",textAlign:"center"}}>
           <div style={{width:48,height:48,borderRadius:DS.r12,background:DS.surEl,
             display:"inline-flex",alignItems:"center",justifyContent:"center",marginBottom:18}}>
             <svg width="22" height="22" viewBox="0 0 16 16" fill="none" stroke={DS.i3}
               strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
               <path d="M2 12l3.5-4.5 3 3L13 4.5M13 4.5H9.5M13 4.5V8"/></svg>
           </div>
-          <div style={{...tsCss(TS.h4),color:DS.i1,marginBottom:8}}>Comece pelo primeiro mês</div>
-          <p style={{...tsCss(TS.body),color:DS.i3,maxWidth:390,margin:"0 auto 22px"}}>
-            Registre o faturamento e o lucro de cada marketplace, mais os gastos com anúncios
-            e impostos. A partir do segundo mês a variação aparece sozinha.
+          <div style={{...tsCss(TS.h4),color:DS.i1,marginBottom:8}}>Nenhum mês registrado</div>
+          <p style={{...tsCss(TS.body),color:DS.i3,maxWidth:380,margin:"0 auto 22px"}}>
+            Registre o faturamento e o lucro de cada canal, mais os gastos com anúncios e
+            impostos. A comparação entre meses aparece automaticamente.
           </p>
-          <Btn onClick={abrirNovo}>Cadastrar mês</Btn>
+          <Btn onClick={abrirNovo}>Registrar primeiro mês</Btn>
         </div>
       ) : (
         <>
-          {/* Linha do tempo dos meses */}
-          <div style={{display:"flex",gap:4,overflowX:"auto",paddingBottom:14,marginBottom:24,
-            borderBottom:`1px solid ${DS.bd}`,scrollbarWidth:"none"}}>
+          {/* ── Seletor de mês ── */}
+          <div role="tablist" aria-label="Selecionar mês"
+            style={{display:"flex",gap:3,overflowX:"auto",paddingBottom:14,marginBottom:22,
+              borderBottom:`1px solid ${DS.bd}`,scrollbarWidth:"none"}}>
             {[...meses].reverse().map(m=>{
               const on=atual?.month===m.month;
               return (
-                <button key={m.id} onClick={()=>setSelMes(m.month)}
-                  style={{padding:"7px 14px",borderRadius:DS.r8,cursor:"pointer",border:"none",
+                <button key={m.id} role="tab" aria-selected={on} onClick={()=>setSelMes(m.month)}
+                  style={{padding:"7px 13px",borderRadius:DS.r8,cursor:"pointer",border:"none",
                     background:on?DS.ink:"transparent",color:on?"#fff":DS.i3,
                     fontFamily:"inherit",...tsCss(TS.caption),fontWeight:on?600:500,
                     whiteSpace:"nowrap",transition:`all ${DS.fast}`}}
@@ -3904,179 +4057,213 @@ function PgFaturamento({ data, setData, tenantId }){
             })}
           </div>
 
-          {/* Indicadores */}
-          <div style={{display:"grid",gridTemplateColumns:isSmall?"1fr 1fr":"repeat(4,1fr)",
+          {/* ── Bloco principal: número herói + indicadores ── */}
+          <div style={{display:"grid",gridTemplateColumns:isSmall?"1fr":"1.15fr 1fr",
             gap:12,marginBottom:12}}>
-            <Kpi label="Faturamento" valor={R(fat)} variacao={vFat}
-              sub={anterior?mesCurto(anterior.month)+" · "+R(somaCanais(anterior)):"primeiro mês"}/>
-            <Kpi label="Lucro bruto" valor={R(luc)} variacao={vLuc}
-              sub={fat>0?((luc/fat)*100).toFixed(1).replace(".",",")+"% do faturamento":null}/>
-            <Kpi label="Gastos" valor={R(gas)} variacao={vGas} inverso acento={DS.err}
-              sub={fat>0?((gas/fat)*100).toFixed(1).replace(".",",")+"% do faturamento":null}/>
-            <Kpi label="Lucro líquido" valor={R(liq)} variacao={vLiq} destaque
-              sub={"margem de "+margem.toFixed(1).replace(".",",")+"%"}/>
-          </div>
 
-          {/* Meta */}
-          {meta>0&&(
-            <div style={{background:DS.sur,borderRadius:DS.r14,border:`1px solid ${DS.bd}`,
-              padding:"18px 20px",marginBottom:28,boxShadow:DS.e1}}>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",
-                gap:12,marginBottom:12,flexWrap:"wrap"}}>
-                <span style={{...tsCss(TS.micro),textTransform:"uppercase",color:DS.i3}}>Meta do mês</span>
-                <div style={{display:"flex",alignItems:"baseline",gap:8}}>
-                  <span className="tnum" style={{...tsCss(TS.h4),
-                    color:fat>=meta?DS.ok:DS.i1,fontFamily:FONT_DISPLAY}}>
-                    {((fat/meta)*100).toFixed(0)}%
-                  </span>
-                  <span className="tnum" style={{...tsCss(TS.caption),color:DS.i3}}>
-                    {R(fat)} de {R(meta)}
-                  </span>
+            <div style={{background:DS.ink,borderRadius:DS.r14,padding:isSmall?"22px 20px":"26px 28px",
+              color:"#fff",display:"flex",flexDirection:"column",justifyContent:"space-between",
+              minHeight:isSmall?"auto":186,boxShadow:DS.e2}}>
+              <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:12}}>
+                <div style={{...tsCss(TS.micro),textTransform:"uppercase",color:"rgba(255,255,255,.6)"}}>
+                  Faturamento do mês
                 </div>
+                <Variacao dado={vFat} titulo={tipAnt}/>
               </div>
-              <div style={{height:6,borderRadius:3,background:DS.surEl,overflow:"hidden"}}>
-                <div style={{width:Math.min(100,(fat/meta)*100)+"%",height:"100%",
-                  background:fat>=meta?DS.ok:DS.ink,borderRadius:3,
-                  transition:`width ${DS.slow}`}}/>
+              <div style={{margin:"18px 0"}}>
+                <div className="tnum" style={{fontFamily:FONT_DISPLAY,fontSize:isSmall?36:44,
+                  fontWeight:700,letterSpacing:"-.034em",lineHeight:1.02}}>{R(fat)}</div>
+                {anterior&&(
+                  <div className="tnum" style={{...tsCss(TS.caption),color:"rgba(255,255,255,.5)",marginTop:8}}>
+                    {mesLabel(anterior.month)} · {R(somaCanais(anterior))}
+                  </div>
+                )}
               </div>
-              <div style={{...tsCss(TS.caption),color:fat>=meta?DS.ok:DS.i3,marginTop:10}}>
-                {fat>=meta
-                  ? "Meta batida com "+R(fat-meta)+" de sobra"
-                  : "Faltam "+R(meta-fat)+" para bater a meta"}
-              </div>
-            </div>
-          )}
-
-          {/* Evolução */}
-          {serie.length>1&&(
-            <div style={{background:DS.sur,borderRadius:DS.r14,border:`1px solid ${DS.bd}`,
-              marginBottom:28,boxShadow:DS.e1,overflow:"hidden"}}>
-              <div style={{padding:"18px 20px 0",display:"flex",justifyContent:"space-between",
-                alignItems:"flex-start",gap:16,flexWrap:"wrap"}}>
+              <div style={{display:"flex",gap:isSmall?18:28,paddingTop:16,
+                borderTop:"1px solid rgba(255,255,255,.14)",flexWrap:"wrap"}}>
                 <div>
-                  <div style={{...tsCss(TS.h4),color:DS.i1,fontFamily:FONT_DISPLAY}}>Evolução</div>
-                  <div style={{...tsCss(TS.caption),color:DS.i3,marginTop:3}}>
-                    Últimos {serie.length} meses
+                  <div style={{...tsCss(TS.micro),textTransform:"uppercase",
+                    color:"rgba(255,255,255,.5)",marginBottom:4}}>Lucro líquido</div>
+                  <div className="tnum" style={{...tsCss(TS.h4),
+                    color:liq>=0?"#6EE7B7":"#FCA5A5"}}>{R(liq)}</div>
+                </div>
+                <div>
+                  <div style={{...tsCss(TS.micro),textTransform:"uppercase",
+                    color:"rgba(255,255,255,.5)",marginBottom:4}}>Margem</div>
+                  <div className="tnum" style={{...tsCss(TS.h4),color:"#fff"}}>
+                    {margem.toFixed(1).replace(".",",")}%
                   </div>
                 </div>
-                <div style={{display:"flex",gap:16}}>
-                  <span style={{display:"flex",alignItems:"center",gap:6,...tsCss(TS.caption),color:DS.i3}}>
-                    <span style={{width:8,height:8,borderRadius:2,background:DS.bdS}}/>Faturamento</span>
-                  <span style={{display:"flex",alignItems:"center",gap:6,...tsCss(TS.caption),color:DS.i3}}>
-                    <span style={{width:8,height:8,borderRadius:2,background:DS.ok}}/>Líquido</span>
+                {meta>0&&(
+                  <div style={{flex:1,minWidth:130}}>
+                    <div style={{display:"flex",justifyContent:"space-between",gap:8,marginBottom:6}}>
+                      <span style={{...tsCss(TS.micro),textTransform:"uppercase",
+                        color:"rgba(255,255,255,.5)"}}>Meta</span>
+                      <span className="tnum" style={{fontSize:11.5,fontWeight:700,
+                        color:fat>=meta?"#6EE7B7":"rgba(255,255,255,.85)"}}>
+                        {((fat/meta)*100).toFixed(0)}%
+                      </span>
+                    </div>
+                    <div style={{height:5,borderRadius:3,background:"rgba(255,255,255,.16)",overflow:"hidden"}}>
+                      <div style={{width:Math.min(100,(fat/meta)*100)+"%",height:"100%",
+                        background:fat>=meta?"#6EE7B7":"#fff",borderRadius:3,
+                        transition:`width ${DS.slow}`}}/>
+                    </div>
+                    <div className="tnum" style={{fontSize:11,color:"rgba(255,255,255,.45)",marginTop:5}}>
+                      {fat>=meta?"batida · +"+R(fat-meta):"faltam "+R(meta-fat)}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div style={{display:"grid",gridTemplateRows:"repeat(3,1fr)",gap:12}}>
+              <Kpi label="Lucro bruto" valor={R(luc)} variacao={vLuc}
+                sub={fat>0?((luc/fat)*100).toFixed(1).replace(".",",")+"% do faturamento":null}/>
+              <Kpi label="Gastos" valor={R(gas)} variacao={vGas} inverso acento={DS.err}
+                sub={fat>0?((gas/fat)*100).toFixed(1).replace(".",",")+"% do faturamento":null}/>
+              <Kpi label="Ticket por canal" valor={R((atual?.channels||[]).length?fat/(atual.channels.length):0)}
+                sub={`${(atual?.channels||[]).length} canais ativos`}/>
+            </div>
+          </div>
+
+          {/* ── Tendência ── */}
+          {serie.length>1&&(
+            <div style={{background:DS.sur,borderRadius:DS.r14,border:`1px solid ${DS.bd}`,
+              marginBottom:12,boxShadow:DS.e1,padding:isSmall?"18px 14px":"20px 22px"}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",
+                gap:16,flexWrap:"wrap",marginBottom:6}}>
+                <div>
+                  <div style={{...tsCss(TS.h4),color:DS.i1,fontFamily:FONT_DISPLAY}}>Tendência</div>
+                  <div style={{...tsCss(TS.caption),color:DS.i3,marginTop:2}}>
+                    Últimos {serie.length} meses · valores em reais
+                  </div>
+                </div>
+                <div style={{display:"flex",gap:16,flexWrap:"wrap"}}>
+                  <span style={{display:"flex",alignItems:"center",gap:7,...tsCss(TS.caption),color:DS.i2}}>
+                    <span style={{width:14,height:2.5,background:DS.ink,borderRadius:2}}/>Faturamento
+                  </span>
+                  <span style={{display:"flex",alignItems:"center",gap:7,...tsCss(TS.caption),color:DS.i2}}>
+                    <span style={{width:14,height:0,borderTop:`2.5px dashed ${DS.ok}`}}/>Lucro líquido
+                  </span>
                 </div>
               </div>
-              <div style={{padding:"24px 20px 20px",display:"flex",alignItems:"flex-end",
-                gap:isSmall?4:8,height:210,overflowX:"auto",scrollbarWidth:"none"}}>
-                {serie.map(m=>{
-                  const v=somaCanais(m), l=liquido(m);
-                  const h=Math.max(4,(v/maxSerie)*140);
-                  const hl=v>0?Math.max(0,(l/maxSerie)*140):0;
-                  const on=atual?.month===m.month;
-                  return (
-                    <button key={m.id} onClick={()=>setSelMes(m.month)}
-                      title={mesLabel(m.month)+"\\nFaturamento "+R(v)+"\\nLíquido "+R(l)}
-                      style={{flex:1,minWidth:isSmall?28:36,display:"flex",flexDirection:"column",
-                        alignItems:"center",gap:8,background:"none",border:"none",cursor:"pointer",
-                        padding:0,opacity:on?1:.72,transition:`opacity ${DS.fast}`}}
-                      onMouseEnter={e=>e.currentTarget.style.opacity=1}
-                      onMouseLeave={e=>e.currentTarget.style.opacity=on?1:.72}>
-                      <span className="tnum" style={{...tsCss(TS.micro),letterSpacing:"0",
-                        color:on?DS.i1:DS.i4,fontWeight:on?700:500,whiteSpace:"nowrap"}}>
-                        {v>=1000?(v/1000).toFixed(0)+"k":v.toFixed(0)}
-                      </span>
-                      <span style={{width:"100%",height:h,borderRadius:"4px 4px 0 0",
-                        position:"relative",background:on?DS.ink:DS.bdM,
-                        transition:`background ${DS.fast}, height ${DS.slow}`}}>
-                        {hl>0&&<span style={{position:"absolute",bottom:0,left:0,right:0,
-                          height:Math.min(h,hl),background:DS.ok,
-                          borderRadius:hl>=h?"4px 4px 0 0":0,opacity:on?1:.6}}/>}
-                      </span>
-                      <span style={{...tsCss(TS.micro),letterSpacing:"0",
-                        color:on?DS.i1:DS.i4,fontWeight:on?700:500,whiteSpace:"nowrap"}}>
-                        {mesCurto(m.month)}
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
+              <TrendChart serie={serie} atualMonth={atual?.month} onPick={setSelMes} isSmall={isSmall}/>
             </div>
           )}
 
-          {/* Canais e gastos */}
-          <div style={{display:"grid",gridTemplateColumns:isSmall?"1fr":"1.35fr 1fr",
-            gap:16,marginBottom:28}}>
+          {/* ── Canais e gastos ── */}
+          <div style={{display:"grid",gridTemplateColumns:isSmall?"1fr":"1.4fr 1fr",
+            gap:12,marginBottom:12}}>
 
             <div style={{background:DS.sur,borderRadius:DS.r14,border:`1px solid ${DS.bd}`,
               boxShadow:DS.e1,overflow:"hidden"}}>
-              <div style={{padding:"18px 20px",borderBottom:`1px solid ${DS.bd}`,
-                display:"flex",justifyContent:"space-between",alignItems:"baseline"}}>
-                <div style={{...tsCss(TS.h4),color:DS.i1,fontFamily:FONT_DISPLAY}}>Marketplaces</div>
-                <div style={{...tsCss(TS.caption),color:DS.i3}}>
-                  {(atual?.channels||[]).length} canais
+              <div style={{padding:"18px 20px 14px",borderBottom:`1px solid ${DS.bd}`}}>
+                <div style={{...tsCss(TS.h4),color:DS.i1,fontFamily:FONT_DISPLAY}}>Canais de venda</div>
+                <div style={{...tsCss(TS.caption),color:DS.i3,marginTop:2}}>
+                  Ordenados por faturamento
                 </div>
               </div>
               {(atual?.channels||[]).length===0
-                ? <div style={{padding:"36px 20px",textAlign:"center",...tsCss(TS.body),color:DS.i3}}>
+                ? <div style={{padding:"40px 20px",textAlign:"center",...tsCss(TS.body),color:DS.i3}}>
                     Nenhum canal lançado neste mês
                   </div>
-                : <div style={{padding:"6px 0"}}>
-                    {[...(atual.channels||[])].sort((a,b)=>(b.revenue||0)-(a.revenue||0))
-                      .map((c,i,arr)=>{
-                      const antC=(anterior?.channels||[]).find(x=>x.name===c.name);
-                      const vc=antC?varPct(Number(c.revenue)||0,Number(antC.revenue)||0):null;
-                      const share=fat>0?((Number(c.revenue)||0)/fat)*100:0;
-                      const cc=corCanal(c.name);
-                      const mg=Number(c.revenue)>0&&Number(c.profit)>0
-                        ? (Number(c.profit)/Number(c.revenue))*100 : null;
-                      return (
-                        <div key={c.name} style={{padding:"14px 20px",
-                          borderBottom:i<arr.length-1?`1px solid ${DS.bd}`:"none"}}>
-                          <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:9}}>
-                            <span style={{width:9,height:9,borderRadius:3,background:cc.cor,
-                              border:`1px solid rgba(0,0,0,.12)`,flexShrink:0}}/>
-                            <span style={{flex:1,...tsCss(TS.bodyMd),color:DS.i1}}>{c.name}</span>
-                            <Variacao dado={vc} titulo={tipAnt}/>
-                            <span className="tnum" style={{...tsCss(TS.bodyMd),fontWeight:650,
-                              color:DS.i1,minWidth:100,textAlign:"right"}}>{R(c.revenue)}</span>
-                          </div>
-                          <div style={{display:"flex",alignItems:"center",gap:10}}>
-                            <div style={{flex:1,height:4,borderRadius:2,background:DS.surEl,
-                              overflow:"hidden"}}>
-                              <div style={{width:share+"%",height:"100%",background:cc.cor,
-                                borderRadius:2,transition:`width ${DS.slow}`}}/>
-                            </div>
-                            <span className="tnum" style={{...tsCss(TS.micro),letterSpacing:"0",
-                              color:DS.i3,minWidth:34,textAlign:"right"}}>
-                              {share.toFixed(0)}%
-                            </span>
-                            {mg!=null&&(
-                              <span className="tnum" style={{...tsCss(TS.micro),letterSpacing:"0",
-                                color:DS.ok,minWidth:88,textAlign:"right"}}>
-                                {R(c.profit)} · {mg.toFixed(0)}%
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                      );
-                    })}
+                : <div style={{overflowX:"auto"}}>
+                    <table style={{width:"100%",borderCollapse:"collapse"}}>
+                      <caption style={{position:"absolute",width:1,height:1,overflow:"hidden",clip:"rect(0 0 0 0)"}}>
+                        Faturamento, participação, lucro e margem por canal em {mesLabel(atual.month)}
+                      </caption>
+                      <thead>
+                        <tr>
+                          {["Canal","Faturamento","Part.","Lucro","Margem",""].map((h,i)=>(
+                            <th key={h+i} scope="col" style={{...tsCss(TS.micro),textTransform:"uppercase",
+                              color:DS.i3,textAlign:i===0?"left":"right",padding:"11px 20px 9px",
+                              whiteSpace:"nowrap",borderBottom:`1px solid ${DS.bd}`,
+                              background:DS.canvas}}>{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {[...(atual.channels||[])].sort((a,b)=>(b.revenue||0)-(a.revenue||0))
+                          .map((c,i,arr)=>{
+                          const antC=(anterior?.channels||[]).find(x=>x.name===c.name);
+                          const vc=antC?varPct(Number(c.revenue)||0,Number(antC.revenue)||0):null;
+                          const share=fat>0?((Number(c.revenue)||0)/fat)*100:0;
+                          const cc=corCanal(c.name);
+                          const mg=Number(c.revenue)>0&&Number(c.profit)>0
+                            ? (Number(c.profit)/Number(c.revenue))*100 : null;
+                          const td={padding:"13px 20px",borderBottom:i<arr.length-1?`1px solid ${DS.bd}`:"none",
+                            textAlign:"right",whiteSpace:"nowrap"};
+                          return (
+                            <tr key={c.name}>
+                              <th scope="row" style={{...td,textAlign:"left",fontWeight:400}}>
+                                <span style={{display:"flex",alignItems:"center",gap:9}}>
+                                  <span style={{width:3,height:22,borderRadius:2,background:cc.cor,
+                                    flexShrink:0}}/>
+                                  <span style={{...tsCss(TS.bodyMd),color:DS.i1}}>{c.name}</span>
+                                </span>
+                              </th>
+                              <td className="tnum" style={{...td,...tsCss(TS.bodyMd),fontWeight:650,color:DS.i1}}>
+                                {R(c.revenue)}
+                              </td>
+                              <td className="tnum" style={{...td,...tsCss(TS.caption),color:DS.i2}}>
+                                {share.toFixed(1).replace(".",",")}%
+                              </td>
+                              <td className="tnum" style={{...td,...tsCss(TS.caption),
+                                color:Number(c.profit)>0?DS.ok:DS.i4}}>
+                                {Number(c.profit)>0?R(c.profit):"—"}
+                              </td>
+                              <td className="tnum" style={{...td,...tsCss(TS.caption),
+                                color:mg!=null?DS.i2:DS.i4}}>
+                                {mg!=null?mg.toFixed(1).replace(".",",")+"%":"—"}
+                              </td>
+                              <td style={{...td,paddingLeft:0}}><Variacao dado={vc} titulo={tipAnt}/></td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                      <tfoot>
+                        <tr>
+                          <th scope="row" style={{padding:"13px 20px",textAlign:"left",
+                            borderTop:`2px solid ${DS.ink}`,...tsCss(TS.bodyMd),fontWeight:700,color:DS.i1}}>
+                            Total
+                          </th>
+                          <td className="tnum" style={{padding:"13px 20px",textAlign:"right",
+                            borderTop:`2px solid ${DS.ink}`,...tsCss(TS.bodyMd),fontWeight:700}}>{R(fat)}</td>
+                          <td className="tnum" style={{padding:"13px 20px",textAlign:"right",
+                            borderTop:`2px solid ${DS.ink}`,...tsCss(TS.caption),color:DS.i2}}>100%</td>
+                          <td className="tnum" style={{padding:"13px 20px",textAlign:"right",
+                            borderTop:`2px solid ${DS.ink}`,...tsCss(TS.caption),fontWeight:650,color:DS.ok}}>{R(luc)}</td>
+                          <td className="tnum" style={{padding:"13px 20px",textAlign:"right",
+                            borderTop:`2px solid ${DS.ink}`,...tsCss(TS.caption),color:DS.i2}}>
+                            {fat>0?(luc/fat*100).toFixed(1).replace(".",",")+"%":"—"}
+                          </td>
+                          <td style={{borderTop:`2px solid ${DS.ink}`}}/>
+                        </tr>
+                      </tfoot>
+                    </table>
                   </div>}
             </div>
 
             <div style={{background:DS.sur,borderRadius:DS.r14,border:`1px solid ${DS.bd}`,
               boxShadow:DS.e1,overflow:"hidden"}}>
-              <div style={{padding:"18px 20px",borderBottom:`1px solid ${DS.bd}`,
-                display:"flex",justifyContent:"space-between",alignItems:"baseline"}}>
-                <div style={{...tsCss(TS.h4),color:DS.i1,fontFamily:FONT_DISPLAY}}>Gastos</div>
-                <div className="tnum" style={{...tsCss(TS.bodyMd),fontWeight:650,color:DS.err}}>
+              <div style={{padding:"18px 20px 14px",borderBottom:`1px solid ${DS.bd}`,
+                display:"flex",justifyContent:"space-between",alignItems:"baseline",gap:10}}>
+                <div>
+                  <div style={{...tsCss(TS.h4),color:DS.i1,fontFamily:FONT_DISPLAY}}>Gastos</div>
+                  <div style={{...tsCss(TS.caption),color:DS.i3,marginTop:2}}>
+                    {(atual?.expenses||[]).length} lançamentos
+                  </div>
+                </div>
+                <div className="tnum" style={{...tsCss(TS.h4),color:DS.err,fontFamily:FONT_DISPLAY}}>
                   {R(gas)}
                 </div>
               </div>
               {(atual?.expenses||[]).length===0
-                ? <div style={{padding:"36px 20px",textAlign:"center",...tsCss(TS.body),color:DS.i3}}>
+                ? <div style={{padding:"40px 20px",textAlign:"center",...tsCss(TS.body),color:DS.i3}}>
                     Nenhum gasto lançado
                   </div>
-                : <div style={{padding:"6px 0"}}>
+                : <div style={{padding:"4px 0"}}>
                     {[...(atual.expenses||[])].sort((a,b)=>(b.amount||0)-(a.amount||0))
                       .map((e,i,arr)=>{
                       const antE=(anterior?.expenses||[]).find(x=>x.name===e.name);
@@ -4089,21 +4276,32 @@ function PgFaturamento({ data, setData, tenantId }){
                             <span style={{flex:1,...tsCss(TS.body),color:DS.i2}}>{e.name}</span>
                             <Variacao dado={ve} inverso titulo={tipAnt}/>
                             <span className="tnum" style={{...tsCss(TS.bodyMd),color:DS.i1,
-                              minWidth:88,textAlign:"right"}}>{R(e.amount)}</span>
+                              minWidth:86,textAlign:"right"}}>{R(e.amount)}</span>
                           </div>
-                          <div style={{height:3,borderRadius:2,background:DS.surEl,overflow:"hidden"}}>
-                            <div style={{width:sh+"%",height:"100%",background:DS.err,opacity:.45,
-                              borderRadius:2}}/>
+                          <div style={{display:"flex",alignItems:"center",gap:9}}>
+                            <div style={{flex:1,height:3,borderRadius:2,background:DS.surEl,overflow:"hidden"}}>
+                              <div style={{width:sh+"%",height:"100%",background:DS.err,opacity:.42,borderRadius:2}}/>
+                            </div>
+                            <span className="tnum" style={{fontSize:11,color:DS.i4,minWidth:32,textAlign:"right"}}>
+                              {sh.toFixed(0)}%
+                            </span>
                           </div>
                         </div>
                       );
                     })}
+                    <div style={{padding:"13px 20px",borderTop:`2px solid ${DS.ink}`,
+                      display:"flex",justifyContent:"space-between",alignItems:"baseline"}}>
+                      <span style={{...tsCss(TS.caption),color:DS.i3}}>Sobre o faturamento</span>
+                      <span className="tnum" style={{...tsCss(TS.bodyMd),fontWeight:700,color:DS.i1}}>
+                        {fat>0?(gas/fat*100).toFixed(1).replace(".",",")+"%":"—"}
+                      </span>
+                    </div>
                   </div>}
             </div>
           </div>
 
           {atual?.notes&&(
-            <div style={{background:DS.surEl,borderRadius:DS.r12,padding:"16px 18px",marginBottom:24}}>
+            <div style={{background:DS.surEl,borderRadius:DS.r12,padding:"15px 18px",marginBottom:14}}>
               <div style={{...tsCss(TS.micro),textTransform:"uppercase",color:DS.i3,marginBottom:7}}>
                 Observações
               </div>
