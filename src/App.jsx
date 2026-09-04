@@ -3715,11 +3715,13 @@ function PgFaturamento({ data, setData, tenantId }){
 
   const EF = () => ({
     month: TODAY.slice(0,7), goal:"",
-    channels: CANAIS_PADRAO.slice(0,4).map(c=>({name:c.name,revenue:"",profit:""})),
+    channels: CANAIS_PADRAO.slice(0,4).map(c=>({name:c.name,revenue:"",profit:"",pct:""})),
     expenses: GASTOS_PADRAO.map(n=>({name:n,amount:""})),
     notes:"",
   });
   const [form,setForm] = useState(EF);
+  const [modoLucro,setModoLucro] = useState("valor"); // "valor" | "pct"
+  const [pctGeral,setPctGeral] = useState("");
 
   const atual = selMes ? meses.find(m=>m.month===selMes) : meses[0];
   const idx = atual ? meses.findIndex(m=>m.month===atual.month) : -1;
@@ -3743,7 +3745,11 @@ function PgFaturamento({ data, setData, tenantId }){
     setEd(m);
     setForm({
       month:m.month, goal:m.goal?String(m.goal):"",
-      channels:(m.channels||[]).map(c=>({name:c.name,revenue:String(c.revenue??""),profit:String(c.profit??"")})),
+      channels:(m.channels||[]).map(c=>{
+        const rev=Number(c.revenue)||0, pf=Number(c.profit)||0;
+        return {name:c.name,revenue:String(c.revenue??""),profit:String(c.profit??""),
+          pct: rev>0&&pf>0 ? (pf/rev*100).toFixed(2) : ""};
+      }),
       expenses:(m.expenses||[]).map(e=>({name:e.name,amount:String(e.amount??"")})),
       notes:m.notes||"",
     });
@@ -3785,7 +3791,34 @@ function PgFaturamento({ data, setData, tenantId }){
     }catch(e){ showToast("Erro: "+e.message,"err"); }
   },{title:"Excluir "+mesLabel(m.month),message:"Todos os dados deste mês serão removidos."});
 
-  const setCanal = (i,k,v) => setForm(p=>({...p,channels:p.channels.map((c,j)=>j===i?{...c,[k]:v}:c)}));
+  const setCanal = (i,k,v) => setForm(p=>({...p,channels:p.channels.map((c,j)=>{
+    if(j!==i) return c;
+    const upd={...c,[k]:v};
+    /* em modo %, o lucro é recalculado sempre que a % ou o faturamento mudam */
+    if(modoLucro==="pct"&&(k==="pct"||k==="revenue")){
+      const rev=num(k==="revenue"?v:c.revenue);
+      const pc=parseFloat(String(k==="pct"?v:c.pct).replace(",","."))||0;
+      upd.profit = rev&&pc ? String(Math.round(rev*pc/100*100)/100) : "";
+    }
+    /* em modo R$, mostra a margem correspondente */
+    if(modoLucro==="valor"&&(k==="profit"||k==="revenue")){
+      const rev=num(k==="revenue"?v:c.revenue);
+      const pf=num(k==="profit"?v:c.profit);
+      upd.pct = rev>0&&pf>0 ? (pf/rev*100).toFixed(2) : "";
+    }
+    return upd;
+  })}));
+
+  /* aplica a mesma margem a todos os canais de uma vez */
+  const aplicarPctGeral = () => {
+    const pc=parseFloat(String(pctGeral).replace(",","."))||0;
+    if(!pc){ showToast("Informe a margem em %.","err"); return; }
+    setForm(p=>({...p,channels:p.channels.map(c=>{
+      const rev=num(c.revenue);
+      return {...c,pct:String(pc),profit:rev?String(Math.round(rev*pc/100*100)/100):""};
+    })}));
+    showToast("Margem de "+pc+"% aplicada a todos os canais.","ok");
+  };
   const setGasto = (i,k,v) => setForm(p=>({...p,expenses:p.expenses.map((e,j)=>j===i?{...e,[k]:v}:e)}));
 
   const prevFat = form.channels.reduce((s,c)=>s+num(c.revenue),0);
@@ -4097,18 +4130,53 @@ function PgFaturamento({ data, setData, tenantId }){
           </div>
 
           <div>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",
+              marginBottom:10,gap:10,flexWrap:"wrap"}}>
               <Lbl ch="Faturamento por marketplace"/>
-              <Btn sz="sm" v="secondary"
-                onClick={()=>setForm(p=>({...p,channels:[...p.channels,{name:"",revenue:"",profit:""}]}))}>
-                + Canal
-              </Btn>
+              <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                <div style={{display:"inline-flex",background:DS.surEl,borderRadius:DS.r8,padding:3,gap:2}}>
+                  {[{v:"valor",l:"Lucro em R$"},{v:"pct",l:"Lucro em %"}].map(o=>{
+                    const on=modoLucro===o.v;
+                    return (
+                      <button key={o.v} onClick={()=>setModoLucro(o.v)}
+                        style={{padding:"5px 11px",borderRadius:DS.r6,border:"none",cursor:"pointer",
+                          background:on?DS.sur:"transparent",color:on?DS.i1:DS.i3,
+                          fontFamily:"inherit",fontSize:12,fontWeight:on?600:500,
+                          boxShadow:on?DS.e1:"none",transition:`all ${DS.fast}`,whiteSpace:"nowrap"}}>
+                        {o.l}
+                      </button>
+                    );
+                  })}
+                </div>
+                <Btn sz="sm" v="secondary"
+                  onClick={()=>setForm(p=>({...p,channels:[...p.channels,{name:"",revenue:"",profit:"",pct:""}]}))}>
+                  + Canal
+                </Btn>
+              </div>
             </div>
+
+            {modoLucro==="pct"&&(
+              <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:10,flexWrap:"wrap",
+                background:DS.blueSft,border:`1px solid ${DS.blueBd}`,borderRadius:DS.r10,
+                padding:"11px 13px"}}>
+                <span style={{fontSize:12.5,color:DS.i2,flex:1,minWidth:180}}>
+                  Mesma margem em todos os canais?
+                </span>
+                <input value={pctGeral} onChange={e=>setPctGeral(e.target.value)}
+                  placeholder="Ex: 28" inputMode="decimal" aria-label="Margem para todos os canais"
+                  style={{width:80,height:36,borderRadius:DS.r8,border:`1px solid ${DS.bd}`,
+                    padding:"0 10px",fontSize:13,fontFamily:"inherit",textAlign:"center",
+                    background:DS.sur,color:DS.i1,fontVariantNumeric:"tabular-nums"}}/>
+                <span style={{fontSize:13,color:DS.i3}}>%</span>
+                <Btn sz="sm" onClick={aplicarPctGeral}>Aplicar a todos</Btn>
+              </div>
+            )}
             <div style={{background:DS.surEl,borderRadius:DS.r10,padding:12}}>
               <div style={{display:"grid",gridTemplateColumns:isSmall?"1fr":"1.3fr 1fr 1fr 40px",
                 gap:8,marginBottom:8,fontSize:10.5,color:DS.i3,fontWeight:600,
                 textTransform:"uppercase",letterSpacing:".05em"}}>
-                <span>Canal</span><span>Faturamento</span><span>Lucro do canal</span><span/>
+                <span>Canal</span><span>Faturamento</span>
+                <span>{modoLucro==="pct"?"Margem (%)":"Lucro (R$)"}</span><span/>
               </div>
               {form.channels.map((c,i)=>(
                 <div key={i} style={{display:"grid",
@@ -4123,11 +4191,33 @@ function PgFaturamento({ data, setData, tenantId }){
                     style={{height:40,borderRadius:DS.r8,border:`1px solid ${DS.bd}`,padding:"0 11px",
                       fontSize:13,fontFamily:"inherit",background:DS.sur,color:DS.i1,
                       fontVariantNumeric:"tabular-nums"}}/>
-                  <input value={c.profit} onChange={e=>setCanal(i,"profit",e.target.value)}
-                    placeholder="opcional" inputMode="decimal"
-                    style={{height:40,borderRadius:DS.r8,border:`1px solid ${DS.bd}`,padding:"0 11px",
-                      fontSize:13,fontFamily:"inherit",background:DS.sur,color:DS.i1,
-                      fontVariantNumeric:"tabular-nums"}}/>
+                  {modoLucro==="pct" ? (
+                    <div style={{position:"relative"}}>
+                      <input value={c.pct||""} onChange={e=>setCanal(i,"pct",e.target.value)}
+                        placeholder="0" inputMode="decimal" aria-label={"Margem de "+(c.name||"canal")}
+                        style={{height:40,width:"100%",borderRadius:DS.r8,border:`1px solid ${DS.bd}`,
+                          padding:"0 26px 0 11px",fontSize:13,fontFamily:"inherit",background:DS.sur,
+                          color:DS.i1,fontVariantNumeric:"tabular-nums"}}/>
+                      <span style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",
+                        fontSize:12,color:DS.i3,pointerEvents:"none"}}>%</span>
+                      {num(c.profit)>0&&(
+                        <div style={{fontSize:11,color:DS.ok,marginTop:3,fontWeight:600,
+                          fontVariantNumeric:"tabular-nums"}}>= {R(num(c.profit))}</div>
+                      )}
+                    </div>
+                  ) : (
+                    <div>
+                      <input value={c.profit} onChange={e=>setCanal(i,"profit",e.target.value)}
+                        placeholder="opcional" inputMode="decimal" aria-label={"Lucro de "+(c.name||"canal")}
+                        style={{height:40,width:"100%",borderRadius:DS.r8,border:`1px solid ${DS.bd}`,
+                          padding:"0 11px",fontSize:13,fontFamily:"inherit",background:DS.sur,
+                          color:DS.i1,fontVariantNumeric:"tabular-nums"}}/>
+                      {c.pct&&(
+                        <div style={{fontSize:11,color:DS.i3,marginTop:3,
+                          fontVariantNumeric:"tabular-nums"}}>margem de {c.pct}%</div>
+                      )}
+                    </div>
+                  )}
                   <button onClick={()=>setForm(p=>({...p,channels:p.channels.filter((_,j)=>j!==i)}))}
                     aria-label="Remover canal"
                     style={{height:40,width:40,borderRadius:DS.r8,border:"none",background:"transparent",
@@ -4141,7 +4231,9 @@ function PgFaturamento({ data, setData, tenantId }){
                 borderTop:`1px solid ${DS.bd}`,fontSize:13}}>
                 <span style={{color:DS.i2}}>Total do mês</span>
                 <span style={{fontWeight:700,fontVariantNumeric:"tabular-nums"}}>
-                  {R(prevFat)}{prevLuc>0?" · lucro "+R(prevLuc):""}
+                  {R(prevFat)}
+                  {prevLuc>0&&<span style={{color:DS.ok}}> · lucro {R(prevLuc)}
+                    {prevFat>0?" ("+(prevLuc/prevFat*100).toFixed(1).replace(".",",")+"%)":""}</span>}
                 </span>
               </div>
             </div>
