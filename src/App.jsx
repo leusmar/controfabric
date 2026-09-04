@@ -147,7 +147,7 @@ const sb = {
     const[
       {data:products,error:e1},{data:rawMaterials,error:e2},{data:trims,error:e3},
       {data:outsourced,error:e4},{data:productions,error:e5},{data:payables,error:e6},
-      {data:purchases,error:e7},{data:users,error:e8}
+      {data:purchases,error:e7},{data:users,error:e8},{data:revenue,error:e9}
     ]=await Promise.all([
       supabase.from("products").select("*").order("name"),
       supabase.from("raw_materials").select("*").order("description"),
